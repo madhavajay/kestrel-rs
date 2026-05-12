@@ -1,0 +1,77 @@
+name: rust
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace --all-features
+      - run: RUSTDOCFLAGS="-D missing-docs" cargo doc -p kestrel --no-deps
+      - run: RUSTDOCFLAGS="-D missing-docs" cargo doc -p kanalyze --no-deps
+      - name: Coverage
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov --workspace --all-features --fail-under-lines 90 --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+
+  rust-java-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Clone Java Kestrel fork
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
+          rm -rf kestrel
+          git clone --branch madhava/bioscript --recurse-submodules https://github.com/madhavajay/kestrel.git kestrel
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Java reference jar
+        run: kestrel/scripts/build-kestrel.sh
+      - name: Rust CLI parity tests
+        env:
+          KESTREL_RUN_JAVA_PARITY: "1"
+          KESTREL_JAR: kestrel/lib/kestrel.jar
+        run: cargo test -p kestrel --test cli_parity -- --nocapture
+
+  vntyper-shim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Clone Java Kestrel fork and VNtyper tests
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
+          rm -rf kestrel
+          git clone --branch madhava/bioscript --recurse-submodules https://github.com/madhavajay/kestrel.git kestrel
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: cargo build --release -p kestrel --bin kestrel
+      - name: VNtyper shim tests
+        run: scripts/vntyper-verify.sh target/release/kestrel

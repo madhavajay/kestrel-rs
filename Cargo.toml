@@ -1,0 +1,33 @@
+[workspace]
+members = [
+    "crates/kanalyze",
+    "crates/kestrel",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "LGPL-3.0-or-later"
+repository = "https://github.com/madhavajay/kestrel-rs"
+
+[workspace.dependencies]
+anyhow = "1"
+bstr = "1"
+clap = { version = "4", features = ["derive"] }
+criterion = "0.5.1"
+crossbeam-channel = "0.5"
+kanalyze = { path = "crates/kanalyze" }
+md-5 = "0.10"
+noodles-bam = "0"
+noodles-bed = "0"
+noodles-fasta = "0"
+noodles-fastq = "0"
+noodles-sam = "0"
+pretty_assertions = "1"
+proptest = "1"
+rstest = "0"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode_names2 = "2"

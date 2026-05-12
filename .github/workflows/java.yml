@@ -18,10 +18,8 @@ jobs:
       - name: Clone Java Kestrel fork
         run: |
           git config --global url."https://github.com/".insteadOf git@github.com:
-          git submodule update --init kestrel
-          git -C kestrel fetch origin madhava/bioscript
-          git -C kestrel checkout -B madhava/bioscript FETCH_HEAD
-          git -C kestrel submodule update --init --recursive
+          rm -rf kestrel
+          git clone --branch madhava/bioscript --recurse-submodules https://github.com/madhavajay/kestrel.git kestrel
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

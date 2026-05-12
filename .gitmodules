@@ -1,0 +1,4 @@
+[submodule "kestrel"]
+	path = kestrel
+	url = git@github.com:madhavajay/kestrel.git
+	branch = madhava/bioscript

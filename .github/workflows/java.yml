@@ -1,0 +1,42 @@
+name: java-kestrel
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: kestrel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+      - name: Clone Java Kestrel fork
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
+          git submodule update --init kestrel
+          git -C kestrel fetch origin madhava/bioscript
+          git -C kestrel checkout -B madhava/bioscript FETCH_HEAD
+          git -C kestrel submodule update --init --recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Fetch tools
+        run: |
+          mkdir -p tools
+          curl -sL -o tools/cfr.jar https://repo1.maven.org/maven2/org/benf/cfr/0.152/cfr-0.152.jar
+          curl -sL -o tools/jacoco-agent.jar https://repo1.maven.org/maven2/org/jacoco/org.jacoco.agent/0.8.12/org.jacoco.agent-0.8.12-runtime.jar
+          curl -sL -o tools/jacoco-cli.jar https://repo1.maven.org/maven2/org/jacoco/org.jacoco.cli/0.8.12/org.jacoco.cli-0.8.12-nodeps.jar
+      - run: scripts/test.sh
+      - run: scripts/cli-smoke.sh
+      - name: Combined coverage
+        run: scripts/coverage-all.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-html
+          path: kestrel/coverage/html/

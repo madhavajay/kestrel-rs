@@ -1386,7 +1386,7 @@ mod tests {
         runner.run().unwrap();
 
         let output = std::fs::read_to_string(out_path).unwrap();
-        assert!(output.contains("##fileformat=VCF4.2"));
+        assert!(output.contains("##fileformat=VCFv4.2"));
         assert!(output.contains("##contig=<ID=chr1,length=12"));
         assert!(output.contains("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample"));
     }

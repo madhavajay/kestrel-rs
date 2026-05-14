@@ -40,6 +40,16 @@ impl KmerCounter {
         self.counts.clear();
     }
 
+    /// Retains only the entries for which `predicate(&kmer, &count)` returns
+    /// true. Mirrors `HashMap::retain`; used to drop k-mers below a count
+    /// threshold (Java Kestrel's default post-count filter is `kmercount:5`).
+    pub fn retain<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&KmerKey, &u32) -> bool,
+    {
+        self.counts.retain(|kmer, count| predicate(kmer, count));
+    }
+
     /// Returns the number of distinct k-mers.
     #[must_use]
     pub fn len(&self) -> usize {

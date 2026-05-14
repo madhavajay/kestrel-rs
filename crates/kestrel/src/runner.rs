@@ -1172,6 +1172,18 @@ fn build_forward_haplotypes(
     let max_sequence_len = region_sequence_limit(config, region, kmer_util.k_size());
     let disable_seq_limit = std::env::var_os("KESTREL_DISABLE_SEQ_LIMIT").is_some();
     let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
+    let trace_region = region_trace_match(region);
+    TRACE_REGION_ACTIVE.with(|c| c.set(trace_region));
+    if trace_region {
+        eprintln!(
+            "[KDBG-TRACE] start region {}:{}-{} initial_kmer={} min_depth={}",
+            region.ref_region.interval.sequence_name,
+            region.start_index,
+            region.end_index,
+            kmer_util.decode(&kmer).into_iter().collect::<String>(),
+            min_depth,
+        );
+    }
     let mut iter_count = 0usize;
     let mut raw_emit_count = 0usize;
 
@@ -1357,6 +1369,27 @@ fn apply_java_cli_cap_reset(config: &mut RunConfig) {
     config.max_haplotypes = KmerAlignmentBuilder::DEFAULT_MAX_HAPLOTYPES;
 }
 
+thread_local! {
+    static TRACE_REGION_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn region_trace_match(region: &ActiveRegion) -> bool {
+    let Some(target) = std::env::var("KESTREL_TRACE_REGION").ok() else {
+        return false;
+    };
+    // Format: "REF:START-END" or just "REF". e.g. "J-R:4-119".
+    let region_id = format!(
+        "{}:{}-{}",
+        region.ref_region.interval.sequence_name,
+        region.start_index,
+        region.end_index
+    );
+    if region_id == target {
+        return true;
+    }
+    region.ref_region.interval.sequence_name == target
+}
+
 fn region_sequence_limit(config: &RunConfig, region: &ActiveRegion, k_size: usize) -> usize {
     let region_len = usize::try_from(region.end_index - region.start_index + 1).unwrap_or(k_size);
     let scan = usize::try_from(config.peak_scan_length.max(0)).unwrap_or(0);
@@ -1425,7 +1458,9 @@ fn choose_branch(
     saved_states: &mut HashSet<SavedBranchKey>,
     next_kmer: fn(&KmerUtil, &KmerKey, Base) -> Result<KmerKey, KmerError>,
 ) -> Result<Option<(Base, KmerKey, i32)>, RunnerError> {
+    let trace_step = TRACE_REGION_ACTIVE.with(|c| c.get());
     let mut selected: Option<(Base, KmerKey, i32)> = None;
+    let mut depths: [i32; 4] = [-1; 4];
     for base in Base::ALL {
         let candidate_kmer = next_kmer(kmer_util, kmer, base)?;
         let depth = kmer_depth(
@@ -1434,6 +1469,7 @@ fn choose_branch(
             &candidate_kmer,
             config.count_reverse_kmers,
         );
+        depths[base as usize] = depth;
         if depth <= 0 {
             continue;
         }
@@ -1464,6 +1500,25 @@ fn choose_branch(
         } else {
             selected = Some((base, candidate_kmer, depth));
         }
+    }
+    if trace_step
+        && let Some((sel_base, sel_kmer, sel_depth)) = &selected
+    {
+        eprintln!(
+            "[KDBG-CHOOSE] kmer={} depths(A,C,G,T)={:?} selected=({}, {}, depth={}) min_depth={}",
+            kmer_util
+                .decode(kmer)
+                .into_iter()
+                .collect::<String>(),
+            depths,
+            sel_base.as_char(),
+            kmer_util
+                .decode(sel_kmer)
+                .into_iter()
+                .collect::<String>(),
+            sel_depth,
+            min_depth
+        );
     }
     Ok(selected)
 }
@@ -1549,8 +1604,11 @@ fn add_unique_haplotype(
 }
 
 fn count_map(config: &RunConfig, kmer_util: KmerUtil) -> Result<Box<dyn CountMap>, CountMapError> {
+    let min_count = u32::try_from(config.min_kmer_count.max(0)).unwrap_or(0);
     if config.kmer_count_in_memory {
-        return Ok(Box::new(MemoryCountMap::new(kmer_util)));
+        return Ok(Box::new(MemoryCountMap::with_min_count(
+            kmer_util, min_count,
+        )));
     }
 
     let minimizer_size = if config.minimizer_size <= 0 {
@@ -1558,7 +1616,7 @@ fn count_map(config: &RunConfig, kmer_util: KmerUtil) -> Result<Box<dyn CountMap
     } else {
         config.minimizer_size as usize
     };
-    IkcCountMap::new(kmer_util, minimizer_size, config.minimizer_mask)
+    IkcCountMap::with_min_count(kmer_util, minimizer_size, config.minimizer_mask, min_count)
         .map(|map| Box::new(map) as Box<dyn CountMap>)
 }
 

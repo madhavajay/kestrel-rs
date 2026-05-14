@@ -103,7 +103,11 @@ fn run_kestrel(reference: &Path, fastqs: &[PathBuf], sample: &str, output: &Path
     runner.set_peak_scan_length(7).unwrap();
     runner.set_scan_limit_factor(7.0).unwrap();
     runner.set_call_ambiguous_regions(true);
-    runner.set_min_kmer_count(1).unwrap();
+    // Use Java's default `DEFAULT_MIN_KMER_COUNT = 5`, which translates to
+    // `kmercount:5` post-count filter in kanalyze. The Java CLI used to
+    // generate the expected fixture passes no --mincount, so 5 is the
+    // effective threshold.
+    runner.set_min_kmer_count(5).unwrap();
     runner
         .set_max_haplotypes(parity_usize_env("KESTREL_VNTYPER_MAX_HAPLOTYPES", 2) as i32)
         .unwrap();

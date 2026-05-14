@@ -130,6 +130,35 @@ pub enum ActiveRegionDetectorError {
     AlignmentWeight(#[from] AlignmentWeightError),
 }
 
+/// Error type produced by [`ActiveRegionDetector::detect_from_counts_with`].
+/// Wraps either an internal detector error or an error returned from the
+/// caller-supplied `accept` callback.
+#[derive(Debug)]
+pub enum AcceptError<E> {
+    /// Error returned from the detector itself.
+    Detector(ActiveRegionDetectorError),
+    /// Error returned from the caller-supplied callback.
+    Callback(E),
+}
+
+impl<E: fmt::Display> fmt::Display for AcceptError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Detector(err) => fmt::Display::fmt(err, f),
+            Self::Callback(err) => fmt::Display::fmt(err, f),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for AcceptError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Detector(err) => Some(err),
+            Self::Callback(err) => Some(err),
+        }
+    }
+}
+
 /// Detects active regions from k-mer depth changes across a reference region.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveRegionDetector {
@@ -259,11 +288,44 @@ impl ActiveRegionDetector {
     }
 
     /// Detects active regions from precomputed reference k-mer counts.
+    ///
+    /// All candidate regions are accepted unconditionally. Use
+    /// [`Self::detect_from_counts_with`] to drive the scan with a callback
+    /// that decides whether to accept each candidate based on downstream
+    /// haplotype assembly (matching Java `KestrelRunner.exec`'s behaviour of
+    /// retrying overlapping regions when haplotype building yields 0 or
+    /// wildtype-only haplotypes).
     pub fn detect_from_counts(
         &self,
         ref_region: &ReferenceRegion,
         ref_count: &[i32],
     ) -> Result<Vec<ActiveRegion>, ActiveRegionDetectorError> {
+        self.detect_from_counts_with(ref_region, ref_count, |_region| {
+            Ok::<bool, ActiveRegionDetectorError>(true)
+        })
+        .map_err(|err| match err {
+            AcceptError::Detector(err) => err,
+            AcceptError::Callback(err) => err,
+        })
+    }
+
+    /// Detects active regions from precomputed reference k-mer counts and
+    /// calls `accept` for each candidate. When `accept` returns `Ok(true)`
+    /// the candidate region is emitted and the scan advances past the
+    /// region; when `accept` returns `Ok(false)` the region is discarded
+    /// and the scan retries from `ref_count_index + 1`. This mirrors Java
+    /// `KestrelRunner.exec`'s `REF_SEARCH` loop, which only advances past a
+    /// region when haplotype assembly produced at least one non-wildtype
+    /// haplotype.
+    pub fn detect_from_counts_with<F, E>(
+        &self,
+        ref_region: &ReferenceRegion,
+        ref_count: &[i32],
+        mut accept: F,
+    ) -> Result<Vec<ActiveRegion>, AcceptError<E>>
+    where
+        F: FnMut(&ActiveRegion) -> Result<bool, E>,
+    {
         let ref_count_size = ref_count.len();
         if ref_count_size < 2 {
             return Ok(Vec::new());
@@ -282,40 +344,64 @@ impl ActiveRegionDetector {
             let count_diff = count_l - count_r;
 
             if count_diff > diff_threshold {
-                if let Some((start, end, next_index, next_count)) = self.scan_right(
-                    ref_region,
-                    ref_count,
-                    ref_count_index,
-                    count_l,
-                    count_r,
-                    diff_threshold,
-                )? {
-                    if let Some(region) = self.make_region(ref_region, ref_count, start, end)? {
-                        last_region_end = region.end_kmer_index;
-                        regions.push(region);
+                let scanned = self
+                    .scan_right(
+                        ref_region,
+                        ref_count,
+                        ref_count_index,
+                        count_l,
+                        count_r,
+                        diff_threshold,
+                    )
+                    .map_err(AcceptError::Detector)?;
+                if let Some((start, end, next_index, next_count)) = scanned {
+                    let candidate = self
+                        .make_region(ref_region, ref_count, start, end)
+                        .map_err(AcceptError::Detector)?;
+                    if let Some(region) = candidate {
+                        let accepted = accept(&region).map_err(AcceptError::Callback)?;
+                        if accepted {
+                            last_region_end = region.end_kmer_index;
+                            regions.push(region);
+                            ref_count_index = next_index;
+                            count_l = next_count;
+                        } else {
+                            count_l = count_r;
+                            ref_count_index += 1;
+                        }
+                    } else {
+                        count_l = count_r;
+                        ref_count_index += 1;
                     }
-                    ref_count_index = next_index;
-                    count_l = next_count;
                 } else {
                     count_l = count_r;
                     ref_count_index += 1;
                 }
             } else if count_diff < diff_threshold_l {
-                if let Some((start, end)) = self.scan_left(
-                    ref_region,
-                    ref_count,
-                    ref_count_index,
-                    diff_threshold,
-                    last_region_end,
-                )? {
+                let scanned = self
+                    .scan_left(
+                        ref_region,
+                        ref_count,
+                        ref_count_index,
+                        diff_threshold,
+                        last_region_end,
+                    )
+                    .map_err(AcceptError::Detector)?;
+                if let Some((start, end)) = scanned {
                     if start < last_region_end && last_region_end > 0 {
                         count_l = count_r;
                         ref_count_index += 1;
                         continue;
                     }
-                    if let Some(region) = self.make_region(ref_region, ref_count, start, end)? {
-                        last_region_end = ref_count_index as i32;
-                        regions.push(region);
+                    let candidate = self
+                        .make_region(ref_region, ref_count, start, end)
+                        .map_err(AcceptError::Detector)?;
+                    if let Some(region) = candidate {
+                        let accepted = accept(&region).map_err(AcceptError::Callback)?;
+                        if accepted {
+                            last_region_end = ref_count_index as i32;
+                            regions.push(region);
+                        }
                     }
                 }
                 count_l = count_r;

@@ -1,8 +1,27 @@
+use std::cell::Cell;
 use std::{fmt, rc::Rc};
 
 use kanalyze::Base;
 use kanalyze::util::{KmerHashSet, KmerKey, KmerUtil};
 use thiserror::Error;
+
+thread_local! {
+    /// Counter for `KmerAligner::save_state` attempts. Updated only when the
+    /// environment variable `KESTREL_DEBUG_BUILD` is set, so normal runs pay
+    /// no cost. Used by `runner.rs` to log per-region save statistics that
+    /// help compare Rust traversal behaviour against Java's CLI traces.
+    pub static SAVE_ATTEMPTS: Cell<u64> = const { Cell::new(0) };
+    /// Counter for accepted `save_state` calls (either plain pushes or
+    /// evictions). See [`SAVE_ATTEMPTS`].
+    pub static SAVE_ACCEPTS: Cell<u64> = const { Cell::new(0) };
+    /// Counter for rejected `save_state` calls (stack at capacity with no
+    /// state having lower min depth). See [`SAVE_ATTEMPTS`].
+    pub static SAVE_REJECTS: Cell<u64> = const { Cell::new(0) };
+}
+
+fn save_counter_enabled() -> bool {
+    std::env::var_os("KESTREL_DEBUG_BUILD").is_some()
+}
 
 use crate::activeregion::{ActiveRegion, ActiveRegionError, Haplotype, RegionStats};
 use crate::constants::{ARRAY_EXPAND_FACTOR, MAX_ARRAY_SIZE, MIN_KMER_SIZE};
@@ -1250,8 +1269,17 @@ impl KmerAligner {
             return Err(KmerAlignerError::NegativeRepeatCount(repeat_count));
         }
 
+        if save_counter_enabled() {
+            SAVE_ATTEMPTS.with(|c| c.set(c.get() + 1));
+        }
         if self.saved_states.len() == self.max_state as usize && !self.remove_min_state(min_depth) {
+            if save_counter_enabled() {
+                SAVE_REJECTS.with(|c| c.set(c.get() + 1));
+            }
             return Ok(());
+        }
+        if save_counter_enabled() {
+            SAVE_ACCEPTS.with(|c| c.set(c.get() + 1));
         }
 
         self.saved_states.push(SavedAlignmentState {

@@ -915,6 +915,9 @@ fn run_pipeline(config: &RunConfig) -> Result<(), RunnerError> {
     if config.samples.is_empty() || config.references.is_empty() {
         return Err(RunnerError::PipelineNotImplemented);
     }
+    let mut config = config.clone();
+    apply_java_cli_cap_reset(&mut config);
+    let config = &config;
     let kmer_util = KmerUtil::new(config.k_size)?;
     let filter_runner = build_filter_runner(config)?;
     let mut reference_reader = ReferenceReader::new(kmer_util.clone());
@@ -964,16 +967,16 @@ fn run_pipeline(config: &RunConfig) -> Result<(), RunnerError> {
             if let Some(haplotype_writer) = &mut haplotype_writer {
                 haplotype_writer.set_reference_region(ref_region.clone())?;
             }
-            let regions = detector.detect_active_regions(ref_region, counter.as_ref())?;
             let emit_context = EmitContext {
                 config,
                 kmer_util: &kmer_util,
                 counter: counter.as_ref(),
                 filter_runner: &filter_runner,
             };
-            emit_region_variants(
+            scan_and_emit_region_variants(
                 &emit_context,
-                &regions,
+                &detector,
+                ref_region,
                 writer.as_mut(),
                 &mut haplotype_writer,
             )?;
@@ -994,17 +997,63 @@ struct EmitContext<'a> {
     filter_runner: &'a VariantFilterRunner,
 }
 
-fn emit_region_variants(
+fn scan_and_emit_region_variants(
     context: &EmitContext<'_>,
-    regions: &[ActiveRegion],
+    detector: &ActiveRegionDetector,
+    ref_region: &crate::refreader::ReferenceRegion,
     writer: &mut dyn VariantWriter,
     haplotype_writer: &mut Option<Box<dyn HaplotypeWriter>>,
 ) -> Result<(), RunnerError> {
-    for region in regions {
-        let haplotypes =
-            graph_haplotypes(context.config, context.kmer_util, context.counter, region)?;
+    let debug = std::env::var_os("KESTREL_DEBUG_REGIONS").is_some();
+    let counts = detector.get_counts(ref_region, context.counter);
+    let mut emitted_regions = 0usize;
+    let mut total_haps = 0usize;
+
+    let result = detector.detect_from_counts_with(ref_region, &counts, |region| {
+        let haplotypes = match graph_haplotypes(
+            context.config,
+            context.kmer_util,
+            context.counter,
+            region,
+        ) {
+            Ok(haps) => haps,
+            Err(err) => return Err(err),
+        };
+
         if haplotypes.is_empty() {
-            continue;
+            if debug {
+                eprintln!(
+                    "[KDBG] region {}:{}-{} -> 0 haplotypes (rejected; retry)",
+                    region.ref_region.interval.sequence_name,
+                    region.start_index,
+                    region.end_index
+                );
+            }
+            return Ok::<bool, RunnerError>(false);
+        }
+
+        if haplotypes.len() == 1 && haplotypes[0].is_wildtype() {
+            if debug {
+                eprintln!(
+                    "[KDBG] region {}:{}-{} -> wildtype only (rejected; retry)",
+                    region.ref_region.interval.sequence_name,
+                    region.start_index,
+                    region.end_index
+                );
+            }
+            return Ok(false);
+        }
+
+        emitted_regions += 1;
+        total_haps += haplotypes.len();
+        if debug {
+            eprintln!(
+                "[KDBG] region {}:{}-{} -> {} haplotypes",
+                region.ref_region.interval.sequence_name,
+                region.start_index,
+                region.end_index,
+                haplotypes.len()
+            );
         }
 
         let mut caller = VariantCaller::new();
@@ -1028,6 +1077,20 @@ fn emit_region_variants(
                 writer.write_variant(Some(&variant))?;
             }
         }
+        Ok(true)
+    });
+
+    match result {
+        Ok(_) => {}
+        Err(crate::activeregion::AcceptError::Detector(err)) => return Err(err.into()),
+        Err(crate::activeregion::AcceptError::Callback(err)) => return Err(err),
+    }
+
+    if debug {
+        eprintln!(
+            "[KDBG] summary: emitted_regions={} total_haps={}",
+            emitted_regions, total_haps
+        );
     }
     Ok(())
 }
@@ -1107,10 +1170,14 @@ fn build_forward_haplotypes(
     let mut emitted = HashSet::new();
     let mut saved_states = HashSet::new();
     let max_sequence_len = region_sequence_limit(config, region, kmer_util.k_size());
+    let disable_seq_limit = std::env::var_os("KESTREL_DISABLE_SEQ_LIMIT").is_some();
+    let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
+    let mut iter_count = 0usize;
+    let mut raw_emit_count = 0usize;
 
     loop {
         loop {
-            if aligner.consensus().len() >= max_sequence_len {
+            if !disable_seq_limit && aligner.consensus().len() >= max_sequence_len {
                 break;
             }
             let Some((base, next_kmer, depth)) = choose_forward_branch(
@@ -1142,9 +1209,12 @@ fn build_forward_haplotypes(
                 break;
             }
         }
+        iter_count += 1;
 
         if min_depth > 0 {
-            for haplotype in aligner.get_haplotypes(counter, config.count_reverse_kmers)? {
+            let haps = aligner.get_haplotypes(counter, config.count_reverse_kmers)?;
+            raw_emit_count += haps.len();
+            for haplotype in haps {
                 add_unique_haplotype(&mut container, &mut emitted, haplotype);
             }
         }
@@ -1156,6 +1226,24 @@ fn build_forward_haplotypes(
         min_depth = restored.min_depth;
         kmer_hash = restored.kmer_hash;
         repeat_count = restored.repeat_count;
+    }
+    if debug {
+        let attempts = crate::align::SAVE_ATTEMPTS.with(|c| c.replace(0));
+        let accepts = crate::align::SAVE_ACCEPTS.with(|c| c.replace(0));
+        let rejects = crate::align::SAVE_REJECTS.with(|c| c.replace(0));
+        eprintln!(
+            "[KDBG-BUILD] fwd region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={}",
+            region.ref_region.interval.sequence_name,
+            region.start_index,
+            region.end_index,
+            iter_count,
+            raw_emit_count,
+            emitted.len(),
+            container.size(),
+            attempts,
+            accepts,
+            rejects,
+        );
     }
 
     Ok(container.to_array())
@@ -1178,10 +1266,14 @@ fn build_reverse_haplotypes(
     let mut emitted = HashSet::new();
     let mut saved_states = HashSet::new();
     let max_sequence_len = region_sequence_limit(config, region, kmer_util.k_size());
+    let disable_seq_limit = std::env::var_os("KESTREL_DISABLE_SEQ_LIMIT").is_some();
+    let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
+    let mut iter_count = 0usize;
+    let mut raw_emit_count = 0usize;
 
     loop {
         loop {
-            if aligner.consensus().len() >= max_sequence_len {
+            if !disable_seq_limit && aligner.consensus().len() >= max_sequence_len {
                 break;
             }
             let Some((base, next_kmer, _depth)) = choose_reverse_branch(
@@ -1210,8 +1302,11 @@ fn build_reverse_haplotypes(
                 break;
             }
         }
+        iter_count += 1;
 
-        for haplotype in aligner.get_haplotypes(counter, config.count_reverse_kmers)? {
+        let haps = aligner.get_haplotypes(counter, config.count_reverse_kmers)?;
+        raw_emit_count += haps.len();
+        for haplotype in haps {
             add_unique_haplotype(&mut container, &mut emitted, haplotype);
         }
 
@@ -1223,8 +1318,43 @@ fn build_reverse_haplotypes(
         kmer_hash = restored.kmer_hash;
         repeat_count = restored.repeat_count;
     }
+    if debug {
+        let attempts = crate::align::SAVE_ATTEMPTS.with(|c| c.replace(0));
+        let accepts = crate::align::SAVE_ACCEPTS.with(|c| c.replace(0));
+        let rejects = crate::align::SAVE_REJECTS.with(|c| c.replace(0));
+        eprintln!(
+            "[KDBG-BUILD] rev region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={}",
+            region.ref_region.interval.sequence_name,
+            region.start_index,
+            region.end_index,
+            iter_count,
+            raw_emit_count,
+            emitted.len(),
+            container.size(),
+            attempts,
+            accepts,
+            rejects,
+        );
+    }
 
     Ok(container.to_array())
+}
+
+/// Mirrors Java's `KestrelRunner.exec` cap-application order, where
+/// `ActiveRegionDetector.setMaxRepeatCount` rebuilds the `KmerAlignmentBuilder`
+/// with builder defaults *after* `setMaxAlignerState` / `setMaxHaplotypes`
+/// have already been applied. The net effect is that Java's CLI silently
+/// ignores `--maxalignstates` / `--maxhapstates` and runs with builder
+/// defaults `DEFAULT_MAX_STATE=10` and `DEFAULT_MAX_HAPLOTYPES=15`. Replicate
+/// that exact observable behaviour so VNtyper-style invocations produce the
+/// same outputs in Rust as in the Java CLI. Opt out by setting
+/// `KESTREL_DISABLE_JAVA_CLI_CAP_RESET=1`.
+fn apply_java_cli_cap_reset(config: &mut RunConfig) {
+    if std::env::var_os("KESTREL_DISABLE_JAVA_CLI_CAP_RESET").is_some() {
+        return;
+    }
+    config.max_aligner_state = KmerAligner::DEFAULT_MAX_STATE;
+    config.max_haplotypes = KmerAlignmentBuilder::DEFAULT_MAX_HAPLOTYPES;
 }
 
 fn region_sequence_limit(config: &RunConfig, region: &ActiveRegion, k_size: usize) -> usize {

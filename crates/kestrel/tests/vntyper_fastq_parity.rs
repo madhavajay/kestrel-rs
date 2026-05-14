@@ -104,9 +104,13 @@ fn run_kestrel(reference: &Path, fastqs: &[PathBuf], sample: &str, output: &Path
     runner.set_scan_limit_factor(7.0).unwrap();
     runner.set_call_ambiguous_regions(true);
     runner.set_min_kmer_count(1).unwrap();
-    runner.set_max_haplotypes(2).unwrap();
+    runner
+        .set_max_haplotypes(parity_usize_env("KESTREL_VNTYPER_MAX_HAPLOTYPES", 2) as i32)
+        .unwrap();
     runner.set_max_repeat_count(0).unwrap();
-    runner.set_max_aligner_state(2).unwrap();
+    runner
+        .set_max_aligner_state(parity_usize_env("KESTREL_VNTYPER_MAX_ALIGNER_STATES", 2) as i32)
+        .unwrap();
     runner.add_reference(FileSequenceSource::from_path(reference, 1).unwrap());
     let sources = fastqs
         .iter()
@@ -305,4 +309,11 @@ fn enabled_bioscript_root() -> Option<PathBuf> {
 
 fn parity_output_dir(label: &str) -> Option<PathBuf> {
     std::env::var_os("KESTREL_VNTYPER_PARITY_OUT").map(|root| PathBuf::from(root).join(label))
+}
+
+fn parity_usize_env(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
 }

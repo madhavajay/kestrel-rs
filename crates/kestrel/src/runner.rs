@@ -1253,14 +1253,21 @@ fn build_forward_haplotypes(
         }
         iter_count += 1;
 
-        if trace_region && iter_count <= 5 {
-            eprintln!(
-                "[KDBG-ITER-END] iter={} consensus_len={} max_align_score={:.1} stack_size={}",
-                iter_count,
-                aligner.consensus().len(),
-                aligner.max_alignment_score(),
-                aligner.saved_state_count(),
-            );
+        if trace_region {
+            let max_log_iter = std::env::var("KESTREL_TRACE_ITER_MAX")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(5);
+            if iter_count <= max_log_iter {
+                eprintln!(
+                    "[KDBG-ITER-END] iter={} consensus_len={} max_align_score={:.1} stack_size={} min_depth={}",
+                    iter_count,
+                    aligner.consensus().len(),
+                    aligner.max_alignment_score(),
+                    aligner.saved_state_count(),
+                    min_depth,
+                );
+            }
         }
 
         if min_depth > 0 {

@@ -1188,6 +1188,9 @@ fn build_forward_haplotypes(
     let outer_iter_cap = std::env::var("KESTREL_OUTER_ITER_CAP")
         .ok()
         .and_then(|v| v.parse::<usize>().ok());
+    let stagnation_cap = std::env::var("KESTREL_STAGNATION_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
     let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
     let trace_region = region_trace_match(region);
     TRACE_REGION_ACTIVE.with(|c| c.set(trace_region));
@@ -1207,6 +1210,8 @@ fn build_forward_haplotypes(
     let mut choose_none_breaks = 0usize;
     let mut add_base_false_breaks = 0usize;
     let mut seq_limit_breaks = 0usize;
+    let mut iters_since_unique_emit = 0usize;
+    let mut last_unique_count = emitted.len();
 
     loop {
         loop {
@@ -1274,7 +1279,17 @@ fn build_forward_haplotypes(
             }
         }
 
+        if emitted.len() > last_unique_count {
+            iters_since_unique_emit = 0;
+            last_unique_count = emitted.len();
+        } else {
+            iters_since_unique_emit += 1;
+        }
+
         if outer_iter_cap.is_some_and(|cap| iter_count >= cap) {
+            break;
+        }
+        if stagnation_cap.is_some_and(|cap| iters_since_unique_emit >= cap) {
             break;
         }
 

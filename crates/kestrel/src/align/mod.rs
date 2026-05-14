@@ -907,6 +907,16 @@ pub struct KmerAligner {
     trace_matrix: Option<TraceMatrix>,
     saved_states: Vec<SavedAlignmentState>,
     max_state: i32,
+    /// "Saves minus evictions" counter — incremented on accepted save,
+    /// decremented on eviction, **NOT** decremented on pop/restore. Mirrors
+    /// Java's `nState` accounting where `restoreState` does not decrement
+    /// the counter, so once max_state saves accumulate, every subsequent
+    /// save must go through the eviction-or-reject logic — even if pops
+    /// have shrunk the actual stack below capacity. Without this counter,
+    /// Rust accepts saves after pop that Java rejects, leading to
+    /// divergent stack contents at iter boundaries on highly repetitive
+    /// regions (e.g. MUC1).
+    saved_state_count: i32,
     alignment_builder: KmerAlignmentBuilder,
     initialized: bool,
     /// Optional `(n_consensus_bases, score_bits)` → shared `haplotype_built`
@@ -958,6 +968,7 @@ impl KmerAligner {
             trace_matrix: None,
             saved_states: Vec::new(),
             max_state: Self::DEFAULT_MAX_STATE,
+            saved_state_count: 0,
             alignment_builder: KmerAlignmentBuilder::new(),
             initialized: false,
             shape_built_cache: std::collections::HashMap::new(),
@@ -989,6 +1000,7 @@ impl KmerAligner {
         self.max_alignment_score = 0.0;
         self.max_alignment_score_node = None;
         self.saved_states.clear();
+        self.saved_state_count = 0;
         self.shape_built_cache.clear();
         self.active_region = Some(active_region);
         self.init_alignment()?;
@@ -1294,7 +1306,12 @@ impl KmerAligner {
         if save_counter_enabled() {
             SAVE_ATTEMPTS.with(|c| c.set(c.get() + 1));
         }
-        if self.saved_states.len() == self.max_state as usize && !self.remove_min_state(min_depth) {
+        // Match Java's `nState == maxState` gate. `saved_state_count` is
+        // incremented on every accepted save and decremented on eviction,
+        // but NOT on pop/restore — so once it reaches `max_state`, every
+        // subsequent save attempt must go through the eviction-or-reject
+        // path even if pops have shrunk `saved_states` below capacity.
+        if self.saved_state_count >= self.max_state && !self.remove_min_state(min_depth) {
             if save_counter_enabled() {
                 SAVE_REJECTS.with(|c| c.set(c.get() + 1));
             }
@@ -1303,6 +1320,7 @@ impl KmerAligner {
         if save_counter_enabled() {
             SAVE_ACCEPTS.with(|c| c.set(c.get() + 1));
         }
+        self.saved_state_count += 1;
 
         self.saved_states.push(SavedAlignmentState {
             kmer,
@@ -1354,6 +1372,9 @@ impl KmerAligner {
             return false;
         };
         self.saved_states.remove(index);
+        // Java's `removeLastMinState` decrements nState only on successful
+        // eviction. Save+evict net to no change in `saved_state_count`.
+        self.saved_state_count -= 1;
         true
     }
 
@@ -1468,6 +1489,7 @@ impl KmerAligner {
         self.max_state = max_state;
         while self.saved_states.len() > max_state as usize {
             self.saved_states.remove(0);
+            self.saved_state_count -= 1;
         }
         Ok(())
     }

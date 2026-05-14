@@ -1248,6 +1248,16 @@ fn build_forward_haplotypes(
         }
         iter_count += 1;
 
+        if trace_region && iter_count <= 5 {
+            eprintln!(
+                "[KDBG-ITER-END] iter={} consensus_len={} max_align_score={:.1} stack_size={}",
+                iter_count,
+                aligner.consensus().len(),
+                aligner.max_alignment_score(),
+                aligner.saved_state_count(),
+            );
+        }
+
         if min_depth > 0 {
             let haps = aligner.get_haplotypes(counter, config.count_reverse_kmers)?;
             if trace_region && !haps.is_empty() {

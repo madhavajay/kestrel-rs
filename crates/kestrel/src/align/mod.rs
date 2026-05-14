@@ -1341,6 +1341,12 @@ impl KmerAligner {
         !self.saved_states.is_empty()
     }
 
+    /// Returns the number of currently-cached backtracking states.
+    #[must_use]
+    pub fn saved_state_count(&self) -> usize {
+        self.saved_states.len()
+    }
+
     /// Builds haplotypes from maximum-scoring alignment traces.
     pub fn get_haplotypes(
         &mut self,

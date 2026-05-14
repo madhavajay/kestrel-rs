@@ -1307,6 +1307,21 @@ fn build_forward_haplotypes(
         min_depth = restored.min_depth;
         kmer_hash = restored.kmer_hash;
         repeat_count = restored.repeat_count;
+        if trace_region {
+            let max_log_iter = std::env::var("KESTREL_TRACE_ITER_MAX")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(5);
+            if iter_count <= max_log_iter {
+                eprintln!(
+                    "[KDBG-RESTORE] post_iter={} restored_consensus_size={} restored_min_depth={} kmer={}",
+                    iter_count,
+                    restored.consensus_size,
+                    min_depth,
+                    kmer_util.decode(&kmer).into_iter().collect::<String>(),
+                );
+            }
+        }
     }
     if debug {
         let attempts = crate::align::SAVE_ATTEMPTS.with(|c| c.replace(0));

@@ -1616,13 +1616,15 @@ fn save_alignment_state(
     repeat_count: i32,
     saved_states: &mut HashSet<SavedBranchKey>,
 ) -> Result<(), RunnerError> {
-    let key = SavedBranchKey {
-        kmer: kmer.words().to_vec(),
-        next_base: base.as_byte(),
-        consensus: aligner.consensus().to_vec(),
-    };
-    if !saved_states.insert(key) {
-        return Ok(());
+    if std::env::var_os("KESTREL_DISABLE_STATE_DEDUP").is_none() {
+        let key = SavedBranchKey {
+            kmer: kmer.words().to_vec(),
+            next_base: base.as_byte(),
+            consensus: aligner.consensus().to_vec(),
+        };
+        if !saved_states.insert(key) {
+            return Ok(());
+        }
     }
     aligner.save_state(
         Some(kmer),

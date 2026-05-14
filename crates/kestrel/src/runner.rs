@@ -1186,10 +1186,15 @@ fn build_forward_haplotypes(
     }
     let mut iter_count = 0usize;
     let mut raw_emit_count = 0usize;
+    let mut cycle_breaks = 0usize;
+    let mut choose_none_breaks = 0usize;
+    let mut add_base_false_breaks = 0usize;
+    let mut seq_limit_breaks = 0usize;
 
     loop {
         loop {
             if !disable_seq_limit && aligner.consensus().len() >= max_sequence_len {
+                seq_limit_breaks += 1;
                 break;
             }
             let Some((base, next_kmer, depth)) = choose_forward_branch(
@@ -1204,6 +1209,7 @@ fn build_forward_haplotypes(
                 &mut saved_states,
             )?
             else {
+                choose_none_breaks += 1;
                 break;
             };
 
@@ -1211,6 +1217,7 @@ fn build_forward_haplotypes(
             if !kmer_hash.insert(kmer.clone()) {
                 repeat_count += 1;
                 if repeat_count > config.max_repeat_count {
+                    cycle_breaks += 1;
                     break;
                 }
             }
@@ -1218,6 +1225,7 @@ fn build_forward_haplotypes(
                 min_depth = depth;
             }
             if !aligner.add_base(base)? {
+                add_base_false_breaks += 1;
                 break;
             }
         }
@@ -1244,7 +1252,7 @@ fn build_forward_haplotypes(
         let accepts = crate::align::SAVE_ACCEPTS.with(|c| c.replace(0));
         let rejects = crate::align::SAVE_REJECTS.with(|c| c.replace(0));
         eprintln!(
-            "[KDBG-BUILD] fwd region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={}",
+            "[KDBG-BUILD] fwd region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={} cycle_breaks={} choose_none_breaks={} add_base_false_breaks={} seq_limit_breaks={}",
             region.ref_region.interval.sequence_name,
             region.start_index,
             region.end_index,
@@ -1255,6 +1263,10 @@ fn build_forward_haplotypes(
             attempts,
             accepts,
             rejects,
+            cycle_breaks,
+            choose_none_breaks,
+            add_base_false_breaks,
+            seq_limit_breaks,
         );
     }
 
@@ -1282,10 +1294,15 @@ fn build_reverse_haplotypes(
     let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
     let mut iter_count = 0usize;
     let mut raw_emit_count = 0usize;
+    let mut cycle_breaks = 0usize;
+    let mut choose_none_breaks = 0usize;
+    let mut add_base_false_breaks = 0usize;
+    let mut seq_limit_breaks = 0usize;
 
     loop {
         loop {
             if !disable_seq_limit && aligner.consensus().len() >= max_sequence_len {
+                seq_limit_breaks += 1;
                 break;
             }
             let Some((base, next_kmer, _depth)) = choose_reverse_branch(
@@ -1300,6 +1317,7 @@ fn build_reverse_haplotypes(
                 &mut saved_states,
             )?
             else {
+                choose_none_breaks += 1;
                 break;
             };
 
@@ -1307,10 +1325,12 @@ fn build_reverse_haplotypes(
             if !kmer_hash.insert(kmer.clone()) {
                 repeat_count += 1;
                 if repeat_count > config.max_repeat_count {
+                    cycle_breaks += 1;
                     break;
                 }
             }
             if !aligner.add_base(base)? {
+                add_base_false_breaks += 1;
                 break;
             }
         }
@@ -1335,7 +1355,7 @@ fn build_reverse_haplotypes(
         let accepts = crate::align::SAVE_ACCEPTS.with(|c| c.replace(0));
         let rejects = crate::align::SAVE_REJECTS.with(|c| c.replace(0));
         eprintln!(
-            "[KDBG-BUILD] rev region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={}",
+            "[KDBG-BUILD] rev region {}:{}-{} iters={} raw_emits={} unique_emitted={} container={} save_attempts={} save_accepts={} save_rejects={} cycle_breaks={} choose_none_breaks={} add_base_false_breaks={} seq_limit_breaks={}",
             region.ref_region.interval.sequence_name,
             region.start_index,
             region.end_index,
@@ -1346,6 +1366,10 @@ fn build_reverse_haplotypes(
             attempts,
             accepts,
             rejects,
+            cycle_breaks,
+            choose_none_breaks,
+            add_base_false_breaks,
+            seq_limit_breaks,
         );
     }
 

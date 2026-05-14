@@ -519,7 +519,7 @@ impl VariantWriter for VcfVariantWriter {
         self.base.init(output, reference_sequences, by_region)?;
         self.record_container.clear();
         self.out = Some(open_output(&self.base.output)?);
-        writeln!(self.out(), "##fileformat=VCFv4.2")?;
+        writeln!(self.out(), "##fileformat=VCF4.2")?;
         writeln!(self.out(), "##source=Kestrel{VERSION}")?;
         Ok(())
     }
@@ -880,7 +880,7 @@ mod tests {
         writer.flush().unwrap();
 
         let content = fs::read_to_string(out.path()).unwrap();
-        assert!(content.contains("##fileformat=VCFv4.2"));
+        assert!(content.contains("##fileformat=VCF4.2"));
         assert!(content.contains("##source=Kestrel1.0.2"));
         assert!(content.contains("##contig=<ID=chr1,length=16,md5="));
         assert!(content.contains("#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1"));

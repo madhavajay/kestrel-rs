@@ -1177,7 +1177,7 @@ fn build_forward_haplotypes(
     let Some(mut kmer) = region.left_end_kmer() else {
         return Ok(Vec::new());
     };
-    let mut min_depth = counter.get(&kmer) as i32;
+    let mut min_depth = kmer_depth(kmer_util, counter, &kmer, config.count_reverse_kmers);
     let mut kmer_hash = KmerHashSet::new();
     let mut repeat_count = 0;
     let mut container = HaplotypeContainer::new(config.max_haplotypes)?;
@@ -1337,7 +1337,7 @@ fn build_reverse_haplotypes(
     let Some(mut kmer) = region.right_end_kmer() else {
         return Ok(Vec::new());
     };
-    let mut min_depth = counter.get(&kmer) as i32;
+    let mut min_depth = kmer_depth(kmer_util, counter, &kmer, config.count_reverse_kmers);
     let mut kmer_hash = KmerHashSet::new();
     let mut repeat_count = 0;
     let mut container = HaplotypeContainer::new(config.max_haplotypes)?;

@@ -345,8 +345,12 @@ pub struct MaxAlignmentScoreNode {
     pub n_consensus_bases: i32,
     /// Next maximum-score node with the same score.
     pub next: Option<Box<MaxAlignmentScoreNode>>,
-    /// True once the node has been converted into a haplotype.
-    pub haplotype_built: bool,
+    /// True once the node has been converted into a haplotype. Shared via
+    /// `Rc<Cell<bool>>` so the flag propagates across every clone of this
+    /// node — matching Java's reference semantics, where setting
+    /// `haplotypeBuilt` on a node observed by a saved state also marks the
+    /// node when that snapshot is later restored.
+    pub haplotype_built: Rc<Cell<bool>>,
 }
 
 impl MaxAlignmentScoreNode {
@@ -367,7 +371,7 @@ impl MaxAlignmentScoreNode {
             trace_node: Rc::new(trace_node),
             n_consensus_bases,
             next,
-            haplotype_built: false,
+            haplotype_built: Rc::new(Cell::new(false)),
         })
     }
 }
@@ -1231,7 +1235,7 @@ impl KmerAligner {
                 trace_node: node,
                 n_consensus_bases: self.consensus.len() as i32,
                 next,
-                haplotype_built: false,
+                haplotype_built: Rc::new(Cell::new(false)),
             }));
             self.max_alignment_score = max_score;
         }
@@ -1362,7 +1366,7 @@ impl KmerAligner {
         let mut current = self.max_alignment_score_node.as_mut();
 
         while let Some(score_node) = current {
-            if !score_node.haplotype_built {
+            if !score_node.haplotype_built.get() {
                 let consensus_size = score_node.n_consensus_bases as usize;
                 let mut sequence = self.consensus[..consensus_size].to_vec();
                 if self.reverse {
@@ -1381,7 +1385,7 @@ impl KmerAligner {
                     self.trace_matrix.clone(),
                     stats,
                 )?);
-                score_node.haplotype_built = true;
+                score_node.haplotype_built.set(true);
             }
             current = score_node.next.as_mut();
         }
@@ -2231,7 +2235,7 @@ mod tests {
         assert_eq!(node.trace_node.as_ref(), &trace);
         assert_eq!(node.n_consensus_bases, 10);
         assert_eq!(node.next, None);
-        assert!(!node.haplotype_built);
+        assert!(!node.haplotype_built.get());
 
         let tail = MaxAlignmentScoreNode::new(
             Some(TraceNode::with_next(1.0, TraceNode::TYPE_MATCH, None)),
@@ -2250,14 +2254,14 @@ mod tests {
 
     #[test]
     fn max_alignment_score_node_validates_and_displays() {
-        let mut node = MaxAlignmentScoreNode::new(
+        let node = MaxAlignmentScoreNode::new(
             Some(TraceNode::with_next(1.0, TraceNode::TYPE_MATCH, None)),
             1,
             None,
         )
         .unwrap();
-        node.haplotype_built = true;
-        assert!(node.haplotype_built);
+        node.haplotype_built.set(true);
+        assert!(node.haplotype_built.get());
 
         assert_eq!(
             MaxAlignmentScoreNode::new(None, 1, None),

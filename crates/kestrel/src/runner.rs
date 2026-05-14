@@ -1185,6 +1185,9 @@ fn build_forward_haplotypes(
     let mut saved_states = HashSet::new();
     let max_sequence_len = region_sequence_limit(config, region, kmer_util.k_size());
     let disable_seq_limit = std::env::var_os("KESTREL_DISABLE_SEQ_LIMIT").is_some();
+    let outer_iter_cap = std::env::var("KESTREL_OUTER_ITER_CAP")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
     let debug = std::env::var_os("KESTREL_DEBUG_BUILD").is_some();
     let trace_region = region_trace_match(region);
     TRACE_REGION_ACTIVE.with(|c| c.set(trace_region));
@@ -1247,10 +1250,22 @@ fn build_forward_haplotypes(
 
         if min_depth > 0 {
             let haps = aligner.get_haplotypes(counter, config.count_reverse_kmers)?;
+            if trace_region && !haps.is_empty() {
+                eprintln!(
+                    "[KDBG-EMIT] iter={} produced {} haps, consensus_len={}",
+                    iter_count,
+                    haps.len(),
+                    aligner.consensus().len()
+                );
+            }
             raw_emit_count += haps.len();
             for haplotype in haps {
                 add_unique_haplotype(&mut container, &mut emitted, haplotype);
             }
+        }
+
+        if outer_iter_cap.is_some_and(|cap| iter_count >= cap) {
+            break;
         }
 
         let Some(restored) = aligner.restore_state()? else {

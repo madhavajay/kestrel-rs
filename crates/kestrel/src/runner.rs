@@ -1691,6 +1691,17 @@ fn add_unique_haplotype(
     emitted: &mut HashSet<(Vec<u8>, Vec<String>)>,
     haplotype: Haplotype,
 ) {
+    // Java has no runner-level dedup — `KmerAlignmentBuilder.buildFwd`
+    // unconditionally pushes every haplotype returned by
+    // `KmerAligner.getHaplotypes` into the container. The
+    // `KESTREL_DISABLE_HAP_DEDUP=1` env-var skips Rust's (sequence,
+    // cigar) dedup so the container can accept duplicates the way Java
+    // does. The container itself still enforces the `max_haplotypes`
+    // cap via min-depth eviction.
+    if std::env::var_os("KESTREL_DISABLE_HAP_DEDUP").is_some() {
+        container.add(haplotype);
+        return;
+    }
     let key = (
         haplotype.sequence.clone(),
         haplotype

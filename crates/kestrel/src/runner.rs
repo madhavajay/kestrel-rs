@@ -1095,6 +1095,20 @@ fn scan_and_emit_region_variants(
     Ok(())
 }
 
+/// Test-only public wrapper around the private `graph_haplotypes` helper.
+/// Allows integration tests under `crates/kestrel/tests/` to drive the
+/// haplotype graph assembly directly on a synthetic count map. Not part of
+/// the stable public API; expect it to move or disappear once parity is
+/// solved.
+pub fn graph_haplotypes_for_test(
+    config: &RunConfig,
+    kmer_util: &KmerUtil,
+    counter: &dyn CountMap,
+    region: &ActiveRegion,
+) -> Result<Vec<Haplotype>, RunnerError> {
+    graph_haplotypes(config, kmer_util, counter, region)
+}
+
 fn graph_haplotypes(
     config: &RunConfig,
     kmer_util: &KmerUtil,

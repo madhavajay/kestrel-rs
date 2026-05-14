@@ -1417,6 +1417,12 @@ fn region_trace_match(region: &ActiveRegion) -> bool {
 fn region_sequence_limit(config: &RunConfig, region: &ActiveRegion, k_size: usize) -> usize {
     let region_len = usize::try_from(region.end_index - region.start_index + 1).unwrap_or(k_size);
     let scan = usize::try_from(config.peak_scan_length.max(0)).unwrap_or(0);
+    if std::env::var_os("KESTREL_TIGHT_SEQ_LIMIT").is_some() {
+        return region_len;
+    }
+    if std::env::var_os("KESTREL_MED_SEQ_LIMIT").is_some() {
+        return region_len + scan;
+    }
     region_len + scan + k_size
 }
 

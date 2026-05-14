@@ -909,6 +909,12 @@ pub struct KmerAligner {
     max_state: i32,
     alignment_builder: KmerAlignmentBuilder,
     initialized: bool,
+    /// Optional `(n_consensus_bases, score_bits)` → shared `haplotype_built`
+    /// cache. Populated only when `KESTREL_SHAPE_DEDUP=1` is set. Causes
+    /// every chain node sharing a `(length, score)` shape to share its
+    /// emit-flag, so once one shape-equivalent node has been emitted no
+    /// further emission happens for that shape.
+    shape_built_cache: std::collections::HashMap<(i32, u32), Rc<Cell<bool>>>,
 }
 
 impl KmerAligner {
@@ -954,6 +960,7 @@ impl KmerAligner {
             max_state: Self::DEFAULT_MAX_STATE,
             alignment_builder: KmerAlignmentBuilder::new(),
             initialized: false,
+            shape_built_cache: std::collections::HashMap::new(),
         })
     }
 
@@ -982,6 +989,7 @@ impl KmerAligner {
         self.max_alignment_score = 0.0;
         self.max_alignment_score_node = None;
         self.saved_states.clear();
+        self.shape_built_cache.clear();
         self.active_region = Some(active_region);
         self.init_alignment()?;
         self.initialized = true;
@@ -1231,11 +1239,21 @@ impl KmerAligner {
             } else {
                 self.max_alignment_score_node.take()
             };
+            let n_consensus_bases = self.consensus.len() as i32;
+            let haplotype_built = if std::env::var_os("KESTREL_SHAPE_DEDUP").is_some() {
+                let key = (n_consensus_bases, max_score.to_bits());
+                self.shape_built_cache
+                    .entry(key)
+                    .or_insert_with(|| Rc::new(Cell::new(false)))
+                    .clone()
+            } else {
+                Rc::new(Cell::new(false))
+            };
             self.max_alignment_score_node = Some(Box::new(MaxAlignmentScoreNode {
                 trace_node: node,
-                n_consensus_bases: self.consensus.len() as i32,
+                n_consensus_bases,
                 next,
-                haplotype_built: Rc::new(Cell::new(false)),
+                haplotype_built,
             }));
             self.max_alignment_score = max_score;
         }

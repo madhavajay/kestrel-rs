@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -140,19 +140,122 @@ fn assert_vcf_records_match(expected: &Path, actual: &Path, label: &str) {
 }
 
 fn vcf_record_diff_context(expected_records: &[String], actual_records: &[String]) -> String {
-    let expected = expected_records.iter().collect::<BTreeSet<_>>();
-    let actual = actual_records.iter().collect::<BTreeSet<_>>();
+    let expected = expected_records
+        .iter()
+        .map(|record| ParsedVcfRecord::parse(record))
+        .collect::<Vec<_>>();
+    let actual = actual_records
+        .iter()
+        .map(|record| ParsedVcfRecord::parse(record))
+        .collect::<Vec<_>>();
+    let expected_keys = expected
+        .iter()
+        .map(|record| &record.key)
+        .collect::<BTreeSet<_>>();
+    let actual_keys = actual
+        .iter()
+        .map(|record| &record.key)
+        .collect::<BTreeSet<_>>();
+    let expected_by_key = expected
+        .iter()
+        .map(|record| (&record.key, record))
+        .collect::<BTreeMap<_, _>>();
+    let actual_by_key = actual
+        .iter()
+        .map(|record| (&record.key, record))
+        .collect::<BTreeMap<_, _>>();
     let missing = expected
-        .difference(&actual)
+        .iter()
+        .filter(|record| !actual_keys.contains(&record.key))
         .take(5)
-        .map(|record| (*record).clone())
+        .map(|record| record.line.clone())
         .collect::<Vec<_>>();
     let extra = actual
-        .difference(&expected)
+        .iter()
+        .filter(|record| !expected_keys.contains(&record.key))
         .take(5)
-        .map(|record| (*record).clone())
+        .map(|record| record.line.clone())
         .collect::<Vec<_>>();
-    format!("missing_examples={missing:?}; extra_examples={extra:?}")
+    let shared_keys = expected_keys.intersection(&actual_keys).collect::<Vec<_>>();
+    let shared_count = shared_keys.len();
+    let same_gdp_count = shared_keys
+        .iter()
+        .filter(|key| expected_by_key[***key].gdp == actual_by_key[***key].gdp)
+        .count();
+    let same_dp_count = shared_keys
+        .iter()
+        .filter(|key| expected_by_key[***key].dp == actual_by_key[***key].dp)
+        .count();
+    format!(
+        "shared={shared_count}; missing={}; extra={}; same_gdp={same_gdp_count}; same_dp={same_dp_count}; expected_types={:?}; actual_types={:?}; expected_gdp_buckets={:?}; actual_gdp_buckets={:?}; missing_examples={missing:?}; extra_examples={extra:?}",
+        expected_keys.len() - shared_count,
+        actual_keys.len() - shared_count,
+        type_counts(&expected),
+        type_counts(&actual),
+        gdp_buckets(&expected),
+        gdp_buckets(&actual),
+    )
+}
+
+#[derive(Debug)]
+struct ParsedVcfRecord {
+    line: String,
+    key: (String, String, String, String, String),
+    gdp: Option<i64>,
+    dp: Option<i64>,
+}
+
+impl ParsedVcfRecord {
+    fn parse(line: &str) -> Self {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let sample = fields.get(9).copied().unwrap_or_default();
+        let sample_fields = sample.split(':').collect::<Vec<_>>();
+        Self {
+            line: line.to_owned(),
+            key: (
+                fields.first().copied().unwrap_or_default().to_owned(),
+                fields.get(1).copied().unwrap_or_default().to_owned(),
+                fields.get(3).copied().unwrap_or_default().to_owned(),
+                fields.get(4).copied().unwrap_or_default().to_owned(),
+                fields.get(8).copied().unwrap_or_default().to_owned(),
+            ),
+            gdp: sample_fields.get(1).and_then(|value| value.parse().ok()),
+            dp: sample_fields.get(2).and_then(|value| value.parse().ok()),
+        }
+    }
+
+    fn variant_kind(&self) -> &'static str {
+        match self.key.3.len().cmp(&self.key.2.len()) {
+            std::cmp::Ordering::Greater => "ins",
+            std::cmp::Ordering::Less => "del",
+            std::cmp::Ordering::Equal => "snp",
+        }
+    }
+}
+
+fn type_counts(records: &[ParsedVcfRecord]) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        *counts.entry(record.variant_kind()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn gdp_buckets(records: &[ParsedVcfRecord]) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::new();
+    for record in records {
+        let bucket = match record.gdp {
+            Some(0) => "0",
+            Some(1) => "1",
+            Some(2..=5) => "2-5",
+            Some(6..=20) => "6-20",
+            Some(21..=100) => "21-100",
+            Some(101..) => ">100",
+            Some(..=-1) | None => "missing",
+        };
+        *counts.entry(bucket).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn vcf_records(path: &Path) -> Vec<String> {

@@ -1523,7 +1523,27 @@ fn add_unique_haplotype(
             .map(|alignment| alignment.cigar_string())
             .collect::<Vec<_>>(),
     );
-    if emitted.insert(key) {
+    let is_new = emitted.insert(key);
+    if is_new
+        && std::env::var_os("KESTREL_DEBUG_HAP_FIRST").is_some()
+        && emitted.len() <= 3
+    {
+        eprintln!(
+            "[KDBG-HAP-FIRST] region={} start={}-{} stats_min={} seq_len={} cigar={:?} seq={}",
+            haplotype.active_region.ref_region.interval.sequence_name,
+            haplotype.active_region.start_index,
+            haplotype.active_region.end_index,
+            haplotype.stats.min,
+            haplotype.sequence.len(),
+            haplotype
+                .alignment_list()
+                .iter()
+                .map(|a| a.cigar_string())
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(&haplotype.sequence)
+        );
+    }
+    if is_new {
         container.add(haplotype);
     }
 }

@@ -1624,10 +1624,23 @@ fn save_alignment_state(
     saved_states: &mut HashSet<SavedBranchKey>,
 ) -> Result<(), RunnerError> {
     if std::env::var_os("KESTREL_DISABLE_STATE_DEDUP").is_none() {
-        let key = SavedBranchKey {
-            kmer: kmer.words().to_vec(),
-            next_base: base.as_byte(),
-            consensus: aligner.consensus().to_vec(),
+        // When `KESTREL_AGGRESSIVE_STATE_DEDUP=1` is set, hash by
+        // (kmer, next_base) only — dropping the consensus suffix. This is
+        // experimental and tests the hypothesis that alt branches converging
+        // at the same kmer/next_base via different consensus paths drive
+        // Rust's outer-iter cycling.
+        let key = if std::env::var_os("KESTREL_AGGRESSIVE_STATE_DEDUP").is_some() {
+            SavedBranchKey {
+                kmer: kmer.words().to_vec(),
+                next_base: base.as_byte(),
+                consensus: Vec::new(),
+            }
+        } else {
+            SavedBranchKey {
+                kmer: kmer.words().to_vec(),
+                next_base: base.as_byte(),
+                consensus: aligner.consensus().to_vec(),
+            }
         };
         if !saved_states.insert(key) {
             return Ok(());

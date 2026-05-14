@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -104,18 +105,38 @@ fn run_kestrel(reference: &Path, fastqs: &[PathBuf], sample: &str, output: &Path
 fn assert_vcf_records_match(expected: &Path, actual: &Path, label: &str) {
     let expected_records = vcf_records(expected);
     let actual_records = vcf_records(actual);
+    let context = vcf_record_diff_context(&expected_records, &actual_records);
     assert_eq!(
         actual_records.len(),
         expected_records.len(),
-        "{label} VCF record count differs"
+        "{label} VCF record count differs: {context}"
     );
     for (index, (actual, expected)) in actual_records
         .iter()
         .zip(expected_records.iter())
         .enumerate()
     {
-        assert_eq!(actual, expected, "{label} VCF record {index} differs");
+        assert_eq!(
+            actual, expected,
+            "{label} VCF record {index} differs: {context}"
+        );
     }
+}
+
+fn vcf_record_diff_context(expected_records: &[String], actual_records: &[String]) -> String {
+    let expected = expected_records.iter().collect::<BTreeSet<_>>();
+    let actual = actual_records.iter().collect::<BTreeSet<_>>();
+    let missing = expected
+        .difference(&actual)
+        .take(5)
+        .map(|record| (*record).clone())
+        .collect::<Vec<_>>();
+    let extra = actual
+        .difference(&expected)
+        .take(5)
+        .map(|record| (*record).clone())
+        .collect::<Vec<_>>();
+    format!("missing_examples={missing:?}; extra_examples={extra:?}")
 }
 
 fn vcf_records(path: &Path) -> Vec<String> {

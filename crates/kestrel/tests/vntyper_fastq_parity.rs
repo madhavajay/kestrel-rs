@@ -27,18 +27,21 @@ fn run_case_if_enabled(case: VntyperCase) {
         .join("ports/vntyper/vntyper/reference")
         .join("All_Pairwise_and_Self_Merged_MUC1_motifs_filtered.fa");
     let temp = TempDir::new().unwrap();
-    let actual_vcf = temp.path().join(format!("{}.rust.vcf", case.label));
+    let work_dir = parity_output_dir(case.label).unwrap_or_else(|| temp.path().to_path_buf());
+    fs::create_dir_all(&work_dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", work_dir.display()));
+    let actual_vcf = work_dir.join(format!("{}.rust.vcf", case.label));
     let fastq_1 = decompress_gzip(
         &root
             .join("ports/vntyper/test-data")
             .join(format!("{}_R1.fastq.gz", case.sample)),
-        temp.path(),
+        &work_dir,
     );
     let fastq_2 = decompress_gzip(
         &root
             .join("ports/vntyper/test-data")
             .join(format!("{}_R2.fastq.gz", case.sample)),
-        temp.path(),
+        &work_dir,
     );
 
     run_kestrel(
@@ -46,17 +49,30 @@ fn run_case_if_enabled(case: VntyperCase) {
         &[fastq_1, fastq_2],
         case.sample,
         &actual_vcf,
-        temp.path(),
+        &work_dir,
     );
 
-    assert_vcf_records_match(
-        &root
-            .join("ports/vntyper/test-data/expected")
+    let expected_vcf = root
+        .join("ports/vntyper/test-data/expected")
+        .join(case.label)
+        .join("kestrel/output.vcf");
+    if let Some(output_dir) = std::env::var_os("KESTREL_VNTYPER_PARITY_OUT") {
+        let copied_expected = PathBuf::from(output_dir)
             .join(case.label)
-            .join("kestrel/output.vcf"),
-        &actual_vcf,
-        case.label,
-    );
+            .join(format!("{}.java-expected.vcf", case.label));
+        fs::copy(&expected_vcf, &copied_expected).unwrap_or_else(|err| {
+            panic!(
+                "failed to copy expected VCF to {}: {err}",
+                copied_expected.display()
+            )
+        });
+        eprintln!(
+            "kept VNtyper Kestrel parity files in {}",
+            work_dir.display()
+        );
+    }
+
+    assert_vcf_records_match(&expected_vcf, &actual_vcf, case.label);
 }
 
 struct VntyperCase {
@@ -182,4 +198,8 @@ fn enabled_bioscript_root() -> Option<PathBuf> {
             .map(PathBuf::from)
             .unwrap_or_else(default_bioscript_root),
     )
+}
+
+fn parity_output_dir(label: &str) -> Option<PathBuf> {
+    std::env::var_os("KESTREL_VNTYPER_PARITY_OUT").map(|root| PathBuf::from(root).join(label))
 }

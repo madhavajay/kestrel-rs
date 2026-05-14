@@ -349,40 +349,76 @@ impl ActiveRegionDetector {
         let k_size = self.kmer_util.k_size() as i32;
         let last_scan_index = ref_count_index.saturating_add(self.scan_limit as usize);
         let mut scan_end_index = ref_count_index + 1;
+        let mut n_peak = 0_usize;
+        let mut peak_scan_index = 0_usize;
+        let mut last_valley_index = 0_usize;
 
-        while scan_end_index <= last_scan_index {
-            scan_end_index = self.scan_recovery_right(
-                ref_count,
-                scan_end_index,
-                ref_count_index,
-                count_l,
-                diff_threshold,
-            );
-            if self.peak_scan_length == 0 || scan_end_index >= ref_count_size {
-                break;
-            }
-            let peak_limit = (scan_end_index + self.peak_scan_length as usize).min(ref_count_size);
-            let recovery_value = self.recovery_value(
-                count_l,
-                scan_end_index as i32 - ref_count_index as i32,
-                diff_threshold,
-            );
-            let mut peak = None;
-            for (index, count) in ref_count
-                .iter()
-                .enumerate()
-                .take(peak_limit)
-                .skip(scan_end_index)
-            {
-                if *count < recovery_value {
-                    peak = Some(index);
-                    break;
+        'scan_loop: while scan_end_index <= last_scan_index {
+            let recovery_value = if self.decay_minimum == 1.0 {
+                let recovery_value = (count_l - diff_threshold).max(1);
+                while scan_end_index < ref_count_size && ref_count[scan_end_index] < recovery_value
+                {
+                    scan_end_index += 1;
                 }
-            }
-            let Some(peak_index) = peak else {
-                break;
+                recovery_value
+            } else {
+                while scan_end_index < ref_count_size {
+                    let distance = scan_end_index as i32 - ref_count_index as i32;
+                    let recovery = self.recovery_value(count_l, distance, diff_threshold);
+                    if ref_count[scan_end_index] >= recovery {
+                        break;
+                    }
+                    scan_end_index += 1;
+                }
+                let distance = scan_end_index as i32 - ref_count_index as i32;
+                self.recovery_value(count_l, distance, diff_threshold)
             };
-            scan_end_index = peak_index;
+
+            if self.peak_scan_length == 0 {
+                break;
+            }
+
+            if peak_scan_index > 0
+                && scan_end_index.saturating_sub(peak_scan_index) >= self.kmer_util.k_size()
+            {
+                last_valley_index = scan_end_index;
+            } else if peak_scan_index == 0
+                && scan_end_index.saturating_sub(ref_count_index) >= self.kmer_util.k_size()
+            {
+                last_valley_index = scan_end_index;
+            }
+
+            peak_scan_index = scan_end_index;
+            let peak_scan_limit =
+                (scan_end_index + self.peak_scan_length as usize).min(ref_count_size);
+
+            while peak_scan_index < peak_scan_limit {
+                if ref_count[peak_scan_index] < recovery_value {
+                    n_peak += 1;
+                    scan_end_index = peak_scan_index;
+
+                    if n_peak > 3
+                        && (scan_end_index - ref_count_index) / n_peak < self.kmer_util.k_size()
+                    {
+                        if last_valley_index > 0 {
+                            scan_end_index = last_valley_index;
+                            break 'scan_loop;
+                        }
+                        return Ok(None);
+                    }
+
+                    continue 'scan_loop;
+                }
+
+                peak_scan_index += 1;
+            }
+
+            if peak_scan_index == ref_count_size && last_valley_index > 0 {
+                scan_end_index = last_valley_index;
+                break;
+            }
+
+            break;
         }
 
         if scan_end_index > last_scan_index {
@@ -521,32 +557,6 @@ impl ActiveRegionDetector {
         }
 
         Ok(Some((start, ref_count_index as i32)))
-    }
-
-    fn scan_recovery_right(
-        &self,
-        ref_count: &[i32],
-        mut scan_end_index: usize,
-        ref_count_index: usize,
-        count_l: i32,
-        diff_threshold: i32,
-    ) -> usize {
-        if self.decay_minimum == 1.0 {
-            let recovery_value = (count_l - diff_threshold).max(1);
-            while scan_end_index < ref_count.len() && ref_count[scan_end_index] < recovery_value {
-                scan_end_index += 1;
-            }
-        } else {
-            while scan_end_index < ref_count.len() {
-                let distance = scan_end_index as i32 - ref_count_index as i32;
-                let recovery = self.recovery_value(count_l, distance, diff_threshold);
-                if ref_count[scan_end_index] >= recovery {
-                    break;
-                }
-                scan_end_index += 1;
-            }
-        }
-        scan_end_index
     }
 
     fn recovery_value(&self, anchor_count: i32, distance: i32, diff_threshold: i32) -> i32 {
@@ -1803,6 +1813,38 @@ mod tests {
     }
 
     #[test]
+    fn active_region_detector_splits_repetitive_peaks_at_last_stable_valley() {
+        let mut detector = ActiveRegionDetector::new(KmerUtil::new(20).unwrap()).unwrap();
+        detector.set_minimum_difference(5).unwrap();
+        detector.set_difference_quantile(0.90).unwrap();
+        detector.set_decay_minimum(0.55).unwrap();
+        detector.set_decay_alpha(0.80).unwrap();
+        detector.set_peak_scan_length(7).unwrap();
+        detector.set_scan_limit_factor(7.0).unwrap();
+        detector.set_anchor_both_ends(true);
+
+        let counts = [
+            114, 149, 153, 59202, 59100, 52224, 53222, 66378, 64023, 66797, 66598, 67415, 16599,
+            16308, 16240, 16992, 17180, 17448, 17327, 17719, 16701, 16696, 16617, 9, 5, 5, 5, 5, 5,
+            6, 6, 6, 9, 6, 925, 964, 962, 976, 944, 926, 916, 903, 903, 50498, 50138, 48915, 47040,
+            44388, 44729, 44481, 44683, 44318, 44677, 44692, 45030, 45854, 47400, 47460, 47328,
+            47362, 47909, 18, 18, 19, 22, 15, 16, 20, 18, 22, 21, 23, 7, 7, 6, 7, 7, 4, 4, 6, 7,
+            16696, 16617, 16494, 16438, 16333, 16546, 16184, 16001, 15990, 15958, 16076, 15435,
+            15844, 77353, 77541, 76438, 77276, 75778, 74633, 75227,
+        ];
+
+        let regions = detector
+            .detect_from_counts(&vntyper_ns_region(), &counts)
+            .unwrap();
+
+        let region_bounds = regions
+            .iter()
+            .map(|region| (region.start_kmer_index, region.end_kmer_index))
+            .collect::<Vec<_>>();
+        assert_eq!(region_bounds, [(4, 43), (60, 94)]);
+    }
+
+    #[test]
     fn active_region_detector_respects_anchor_both_ends_for_right_end_regions() {
         let mut detector = ActiveRegionDetector::new(KmerUtil::new(4).unwrap()).unwrap();
         detector.set_difference_quantile(0.0).unwrap();
@@ -1853,6 +1895,12 @@ mod tests {
 
     fn ref16() -> ReferenceRegion {
         ref_region(b"AAAACCCCGGGGTTTT")
+    }
+
+    fn vntyper_ns_region() -> ReferenceRegion {
+        ref_region(
+            b"TGCGGGGGCGGTGGAGCCCGGGGCCGGCCTGCTCTCCGGGGCTGAGGTGACACCGTGGGCTGGGGGGGCGGTGGAGCCCGTGGCCGGCCTGCTCTCCGGGGCCGAGGTGACACCGTGGGC",
+        )
     }
 
     fn ar_default() -> ActiveRegion {

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, rc::Rc};
 
 use kanalyze::Base;
 use kanalyze::util::{KmerHashSet, KmerKey, KmerUtil};
@@ -35,10 +35,12 @@ pub struct TraceNode {
     /// Trace node type.
     pub node_type: i8,
     /// Previous node in the selected trace path.
-    pub next_node: Option<Box<TraceNode>>,
+    pub next_node: Option<Rc<TraceNode>>,
     /// Alternate predecessor with the same score.
-    pub branch_node: Option<Box<TraceNode>>,
+    pub branch_node: Option<Rc<TraceNode>>,
 }
+
+pub type TraceNodeRef = Rc<TraceNode>;
 
 impl TraceNode {
     /// Sentinel node type.
@@ -65,8 +67,8 @@ impl TraceNode {
     pub fn new(
         score: f32,
         node_type: i8,
-        next_node: Option<Box<Self>>,
-        branch_node: Option<Box<Self>>,
+        next_node: Option<TraceNodeRef>,
+        branch_node: Option<TraceNodeRef>,
     ) -> Result<Self, TraceNodeError> {
         if score < 0.0 {
             return Err(TraceNodeError::NegativeScore);
@@ -89,7 +91,7 @@ impl TraceNode {
 
     /// Creates a trace node without a branch predecessor.
     #[must_use]
-    pub fn with_next(score: f32, node_type: i8, next_node: Option<Box<Self>>) -> Self {
+    pub fn with_next(score: f32, node_type: i8, next_node: Option<TraceNodeRef>) -> Self {
         Self {
             score,
             node_type,
@@ -319,7 +321,7 @@ impl HaplotypeContainer {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaxAlignmentScoreNode {
     /// Trace node at the maximum score.
-    pub trace_node: Box<TraceNode>,
+    pub trace_node: TraceNodeRef,
     /// Number of consensus bases consumed at this score.
     pub n_consensus_bases: i32,
     /// Next maximum-score node with the same score.
@@ -343,7 +345,7 @@ impl MaxAlignmentScoreNode {
         }
 
         Ok(Self {
-            trace_node: Box::new(trace_node),
+            trace_node: Rc::new(trace_node),
             n_consensus_bases,
             next,
             haplotype_built: false,
@@ -869,12 +871,12 @@ pub struct KmerAligner {
     ref_length: usize,
     reverse: bool,
     allow_end_deletion: bool,
-    matrix_col_align: Vec<Option<TraceNode>>,
-    matrix_col_gap_ref: Vec<Option<TraceNode>>,
-    matrix_col_gap_con: Vec<Option<TraceNode>>,
-    matrix_col_align_next: Vec<Option<TraceNode>>,
-    matrix_col_gap_ref_next: Vec<Option<TraceNode>>,
-    matrix_col_gap_con_next: Vec<Option<TraceNode>>,
+    matrix_col_align: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_ref: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_con: Vec<Option<TraceNodeRef>>,
+    matrix_col_align_next: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_ref_next: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_con_next: Vec<Option<TraceNodeRef>>,
     consensus: Vec<u8>,
     consensus_capacity: usize,
     max_alignment_score: f32,
@@ -977,11 +979,11 @@ impl KmerAligner {
         };
 
         for count in 0..self.kmer_util.k_size() {
-            last_node = Some(TraceNode::with_next(
+            last_node = Some(Rc::new(TraceNode::with_next(
                 init_score,
                 TraceNode::TYPE_MATCH,
-                last_node.map(Box::new),
-            ));
+                last_node,
+            )));
             if let Some(trace_matrix) = &mut self.trace_matrix {
                 trace_matrix.next_col()?;
                 trace_matrix.set(
@@ -998,11 +1000,11 @@ impl KmerAligner {
             && init_score + self.alignment_weight.new_gap > 0.0
         {
             let index = self.kmer_util.k_size();
-            self.matrix_col_gap_con[index] = Some(TraceNode::with_next(
+            self.matrix_col_gap_con[index] = Some(Rc::new(TraceNode::with_next(
                 init_score + self.alignment_weight.new_gap,
                 TraceNode::TYPE_GAP_CON,
-                last_node.map(Box::new),
-            ));
+                last_node,
+            )));
             let mut previous = self.matrix_col_gap_con[index].clone();
             for index in self.kmer_util.k_size() + 1..self.ref_length {
                 let Some(previous_node) = previous else {
@@ -1012,11 +1014,11 @@ impl KmerAligner {
                 if score <= 0.0 {
                     break;
                 }
-                self.matrix_col_gap_con[index] = Some(TraceNode::with_next(
+                self.matrix_col_gap_con[index] = Some(Rc::new(TraceNode::with_next(
                     score,
                     TraceNode::TYPE_GAP_CON,
-                    Some(Box::new(previous_node.clone())),
-                ));
+                    Some(Rc::clone(&previous_node)),
+                )));
                 previous = self.matrix_col_gap_con[index].clone();
             }
         }
@@ -1198,7 +1200,7 @@ impl KmerAligner {
         Ok(max_potential_score >= self.max_alignment_score && max_potential_score > 0.0)
     }
 
-    fn record_max_node(&mut self, node: TraceNode) {
+    fn record_max_node(&mut self, node: TraceNodeRef) {
         let max_score = node.score;
         if max_score >= self.max_alignment_score && max_score > 0.0 {
             let next = if max_score > self.max_alignment_score {
@@ -1207,7 +1209,7 @@ impl KmerAligner {
                 self.max_alignment_score_node.take()
             };
             self.max_alignment_score_node = Some(Box::new(MaxAlignmentScoreNode {
-                trace_node: Box::new(node),
+                trace_node: node,
                 n_consensus_bases: self.consensus.len() as i32,
                 next,
                 haplotype_built: false,
@@ -1297,7 +1299,7 @@ impl KmerAligner {
             .iter()
             .enumerate()
             .filter(|(_, state)| state.min_depth < min_depth_limit)
-            .min_by_key(|(_, state)| state.min_depth)
+            .min_by_key(|(index, state)| (state.min_depth, std::cmp::Reverse(*index)))
         else {
             return false;
         };
@@ -1336,7 +1338,7 @@ impl KmerAligner {
                     haplotype_stats(&self.kmer_util, &sequence, counter, count_reverse_kmers)?;
                 let alignments = self
                     .alignment_builder
-                    .alignments_from_trace(Some(&score_node.trace_node), self.reverse)?;
+                    .alignments_from_trace(Some(score_node.trace_node.as_ref()), self.reverse)?;
                 haplotypes.push(Haplotype::new(
                     sequence,
                     active_region.clone(),
@@ -1438,9 +1440,9 @@ struct SavedAlignmentState {
     kmer: KmerKey,
     next_base: Base,
     consensus_size: usize,
-    matrix_col_align: Vec<Option<TraceNode>>,
-    matrix_col_gap_ref: Vec<Option<TraceNode>>,
-    matrix_col_gap_con: Vec<Option<TraceNode>>,
+    matrix_col_align: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_ref: Vec<Option<TraceNodeRef>>,
+    matrix_col_gap_con: Vec<Option<TraceNodeRef>>,
     max_alignment_score: f32,
     max_alignment_score_node: Option<Box<MaxAlignmentScoreNode>>,
     min_depth: i32,
@@ -1448,29 +1450,24 @@ struct SavedAlignmentState {
     repeat_count: i32,
 }
 
-fn score_from(node: &Option<TraceNode>, add: f32) -> f32 {
+fn score_from(node: &Option<TraceNodeRef>, add: f32) -> f32 {
     node.as_ref().map_or(0.0, |node| node.score + add)
 }
 
 fn trace_branch(
     max_score: f32,
     node_type: i8,
-    candidates: &[(f32, &Option<TraceNode>); 3],
-) -> Option<TraceNode> {
+    candidates: &[(f32, &Option<TraceNodeRef>); 3],
+) -> Option<TraceNodeRef> {
     let mut last = None;
     for (score, previous) in candidates {
         if *score == max_score
             && let Some(previous) = previous
         {
-            last = Some(
-                TraceNode::new(
-                    max_score,
-                    node_type,
-                    Some(Box::new(previous.clone())),
-                    last.map(Box::new),
-                )
-                .expect("KmerAligner only creates valid trace nodes"),
-            );
+            last = Some(Rc::new(
+                TraceNode::new(max_score, node_type, Some(Rc::clone(previous)), last)
+                    .expect("KmerAligner only creates valid trace nodes"),
+            ));
         }
     }
     last
@@ -1478,10 +1475,10 @@ fn trace_branch(
 
 fn set_trace_matrix(
     trace_matrix: &mut TraceMatrix,
-    column: &[Option<TraceNode>],
+    column: &[Option<TraceNodeRef>],
 ) -> Result<(), TraceMatrixError> {
     for (index, node) in column.iter().enumerate() {
-        let mut node = node.as_ref();
+        let mut node = node.as_deref();
         while let Some(current) = node {
             if let Some(next) = current.next_node.as_deref() {
                 trace_matrix.set(
@@ -1522,11 +1519,13 @@ fn haplotype_stats(
 
 /// Saved aligner state types used during graph backtracking.
 pub mod state {
+    use std::rc::Rc;
+
     use kanalyze::Base;
     use kanalyze::util::KmerHashSet;
     use thiserror::Error;
 
-    use super::{MaxAlignmentScoreNode, TraceNode};
+    use super::{MaxAlignmentScoreNode, TraceNode, TraceNodeRef};
 
     /// Errors returned by [`TraceNodeContainer`].
     #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -1542,7 +1541,7 @@ pub mod state {
         /// Matrix row or column index represented by this container.
         pub index: i32,
         /// Trace node stored at this index.
-        pub node: Box<TraceNode>,
+        pub node: TraceNodeRef,
         /// Next container in the linked list.
         pub next: Option<Box<TraceNodeContainer>>,
     }
@@ -1560,7 +1559,7 @@ pub mod state {
 
             Ok(Self {
                 index,
-                node: Box::new(node),
+                node: Rc::new(node),
                 next,
             })
         }
@@ -2077,8 +2076,8 @@ mod tests {
         let node = TraceNode::new(
             10.0,
             TraceNode::TYPE_MATCH,
-            Some(Box::new(prev.clone())),
-            Some(Box::new(branch.clone())),
+            Some(Rc::new(prev.clone())),
+            Some(Rc::new(branch.clone())),
         )
         .unwrap();
 
@@ -2501,8 +2500,8 @@ mod tests {
     #[test]
     fn kmer_alignment_builder_expands_linear_trace_like_java_get_alignment() {
         let tail = TraceNode::with_next(3.0, TraceNode::TYPE_MATCH, None);
-        let middle = TraceNode::with_next(4.0, TraceNode::TYPE_MISMATCH, Some(Box::new(tail)));
-        let root = TraceNode::with_next(5.0, TraceNode::TYPE_MATCH, Some(Box::new(middle)));
+        let middle = TraceNode::with_next(4.0, TraceNode::TYPE_MISMATCH, Some(Rc::new(tail)));
+        let root = TraceNode::with_next(5.0, TraceNode::TYPE_MATCH, Some(Rc::new(middle)));
         let mut builder = KmerAlignmentBuilder::new();
 
         let fwd = builder.alignments_from_trace(Some(&root), false).unwrap();
@@ -2518,7 +2517,7 @@ mod tests {
     #[test]
     fn kmer_alignment_builder_preserves_trace_order_difference_for_asymmetric_paths() {
         let tail = TraceNode::with_next(3.0, TraceNode::TYPE_GAP_REF, None);
-        let root = TraceNode::with_next(5.0, TraceNode::TYPE_MATCH, Some(Box::new(tail)));
+        let root = TraceNode::with_next(5.0, TraceNode::TYPE_MATCH, Some(Rc::new(tail)));
         let mut builder = KmerAlignmentBuilder::new();
 
         let fwd = builder.alignments_from_trace(Some(&root), false).unwrap();
@@ -2532,13 +2531,12 @@ mod tests {
     fn kmer_alignment_builder_expands_branches_into_distinct_alignments() {
         let main_tail = TraceNode::with_next(3.0, TraceNode::TYPE_MATCH, None);
         let branch_tail = TraceNode::with_next(2.0, TraceNode::TYPE_GAP_CON, None);
-        let branch =
-            TraceNode::with_next(2.0, TraceNode::TYPE_GAP_REF, Some(Box::new(branch_tail)));
+        let branch = TraceNode::with_next(2.0, TraceNode::TYPE_GAP_REF, Some(Rc::new(branch_tail)));
         let root = TraceNode::new(
             5.0,
             TraceNode::TYPE_MATCH,
-            Some(Box::new(main_tail)),
-            Some(Box::new(branch)),
+            Some(Rc::new(main_tail)),
+            Some(Rc::new(branch)),
         )
         .unwrap();
         let mut builder = KmerAlignmentBuilder::new();
@@ -2674,6 +2672,48 @@ mod tests {
         assert_eq!(restored.kmer, second_kmer.words());
         assert_eq!(restored.min_depth, 5);
         assert_eq!(aligner.consensus(), b"AAAAG");
+        assert!(!aligner.has_cached_states());
+    }
+
+    #[test]
+    fn kmer_aligner_capacity_removes_newest_equal_min_depth_like_java_stack() {
+        let kmer_util = KmerUtil::new(4).unwrap();
+        let mut aligner =
+            KmerAligner::new(kmer_util.clone(), AlignmentWeight::defaults(), false).unwrap();
+        aligner.init(make_active_region(10, 0, 12)).unwrap();
+        aligner.set_max_state(2).unwrap();
+
+        let oldest = kmer_util.encode(b"AAAC").unwrap();
+        let newest = kmer_util.encode(b"AAAG").unwrap();
+        let incoming = kmer_util.encode(b"AAAT").unwrap();
+
+        aligner
+            .save_state(
+                Some(oldest.clone()),
+                Some(Base::C),
+                1,
+                Some(KmerHashSet::new()),
+                0,
+            )
+            .unwrap();
+        aligner
+            .save_state(Some(newest), Some(Base::G), 1, Some(KmerHashSet::new()), 0)
+            .unwrap();
+        aligner
+            .save_state(
+                Some(incoming.clone()),
+                Some(Base::T),
+                2,
+                Some(KmerHashSet::new()),
+                0,
+            )
+            .unwrap();
+
+        let restored = aligner.restore_state().unwrap().unwrap();
+        assert_eq!(restored.kmer, incoming.words());
+
+        let restored = aligner.restore_state().unwrap().unwrap();
+        assert_eq!(restored.kmer, oldest.words());
         assert!(!aligner.has_cached_states());
     }
 

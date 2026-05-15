@@ -1498,6 +1498,7 @@ fn region_name_matches_env(ref_region: &crate::refreader::ReferenceRegion) -> bo
     ref_region.interval.sequence_name == target
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choose_forward_branch(
     config: &RunConfig,
     kmer_util: &KmerUtil,
@@ -1523,6 +1524,7 @@ fn choose_forward_branch(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choose_reverse_branch(
     config: &RunConfig,
     kmer_util: &KmerUtil,
@@ -1548,6 +1550,7 @@ fn choose_reverse_branch(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn choose_branch(
     config: &RunConfig,
     kmer_util: &KmerUtil,
@@ -2014,7 +2017,7 @@ mod tests {
     fn graph_haplotypes_assembles_overlapping_kmer_path_without_full_read() {
         let kmer_util = KmerUtil::new(4).unwrap();
         let reference = ref_region(b"AAAACCCCGGGGTTTT");
-        let region = ActiveRegion::new(reference, 0, 12, &vec![5; 13], &kmer_util).unwrap();
+        let region = ActiveRegion::new(reference, 0, 12, &[5; 13], &kmer_util).unwrap();
         let mut counts = StaticCountMap::default();
         for kmer in [
             "AAAA", "AAAT", "AATC", "ATCC", "TCCC", "CCCG", "CCGG", "CGGG", "GGGG", "GGGT", "GGTT",
@@ -2022,13 +2025,15 @@ mod tests {
         ] {
             counts.insert(&kmer_util, kmer, 5);
         }
-        let mut config = RunConfig::default();
-        config.k_size = 4;
-        config.min_kmer_count = 1;
-        config.minimum_difference = 1;
-        config.count_reverse_kmers = false;
-        config.max_haplotypes = 4;
-        config.max_aligner_state = 8;
+        let config = RunConfig {
+            k_size: 4,
+            min_kmer_count: 1,
+            minimum_difference: 1,
+            count_reverse_kmers: false,
+            max_haplotypes: 4,
+            max_aligner_state: 8,
+            ..RunConfig::default()
+        };
 
         let haplotypes = graph_haplotypes(&config, &kmer_util, &counts, &region).unwrap();
 
@@ -2064,7 +2069,7 @@ mod tests {
     fn add_unique_haplotype_skips_duplicate_sequence_and_alignment() {
         let kmer_util = KmerUtil::new(4).unwrap();
         let reference = ref_region(b"AAAACCCCGGGGTTTT");
-        let region = ActiveRegion::new(reference, 0, 12, &vec![5; 13], &kmer_util).unwrap();
+        let region = ActiveRegion::new(reference, 0, 12, &[5; 13], &kmer_util).unwrap();
         let alignment = AlignNode::new(AlignNode::MATCH, 16, None).unwrap();
         let haplotype = test_haplotype(&region, alignment.clone());
         let duplicate = test_haplotype(&region, alignment);
@@ -2126,13 +2131,15 @@ mod tests {
             "TGGGGGGGCGGTGGAGCCCGGGGCCGGGGTGGAGCCCGGGGCCGGCCTGGTGTCCGGGGCCGAGGTGACACC",
             1486,
         );
-        let mut config = RunConfig::default();
-        config.k_size = 20;
-        config.min_kmer_count = 1;
-        config.minimum_difference = 5;
-        config.count_reverse_kmers = false;
-        config.max_haplotypes = 15;
-        config.max_aligner_state = 10;
+        let config = RunConfig {
+            k_size: 20,
+            min_kmer_count: 1,
+            minimum_difference: 5,
+            count_reverse_kmers: false,
+            max_haplotypes: 15,
+            max_aligner_state: 10,
+            ..RunConfig::default()
+        };
 
         let haplotypes = graph_haplotypes(&config, &kmer_util, &map, &region).unwrap();
 

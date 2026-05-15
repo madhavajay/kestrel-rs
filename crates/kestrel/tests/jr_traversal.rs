@@ -45,15 +45,17 @@ fn jr_traversal_chain_growth() {
         region.end_index - region.start_index + 1
     );
 
-    let mut config = RunConfig::default();
-    config.k_size = 20;
-    config.min_kmer_count = 5;
-    config.minimum_difference = 5;
-    config.count_reverse_kmers = true;
-    config.max_haplotypes = 15;
-    config.max_aligner_state = 10;
-    config.max_repeat_count = 0;
-    config.peak_scan_length = 7;
+    let config = RunConfig {
+        k_size: 20,
+        min_kmer_count: 5,
+        minimum_difference: 5,
+        count_reverse_kmers: true,
+        max_haplotypes: 15,
+        max_aligner_state: 10,
+        max_repeat_count: 0,
+        peak_scan_length: 7,
+        ..RunConfig::default()
+    };
 
     let haplotypes = graph_haplotypes_for_test(&config, &kmer_util, &count_map, &region).unwrap();
 
@@ -92,15 +94,17 @@ fn five_c_n_insertion_region_diagnostic() {
     let counts_array = collect_counts(&kmer_util, &ref_region, &count_map);
     let region = ActiveRegion::new(ref_region.clone(), 0, 34, &counts_array, &kmer_util).unwrap();
 
-    let mut config = RunConfig::default();
-    config.k_size = 20;
-    config.min_kmer_count = 5;
-    config.minimum_difference = 5;
-    config.count_reverse_kmers = true;
-    config.max_haplotypes = 15;
-    config.max_aligner_state = 10;
-    config.max_repeat_count = 0;
-    config.peak_scan_length = 7;
+    let config = RunConfig {
+        k_size: 20,
+        min_kmer_count: 5,
+        minimum_difference: 5,
+        count_reverse_kmers: true,
+        max_haplotypes: 15,
+        max_aligner_state: 10,
+        max_repeat_count: 0,
+        peak_scan_length: 7,
+        ..RunConfig::default()
+    };
 
     let haplotypes = graph_haplotypes_for_test(&config, &kmer_util, &count_map, &region).unwrap();
 

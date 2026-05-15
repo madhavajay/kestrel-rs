@@ -63,6 +63,7 @@ pub struct TraceNode {
     pub branch_node: Option<Rc<TraceNode>>,
 }
 
+/// Shared reference to a trace node in the alignment matrix.
 pub type TraceNodeRef = Rc<TraceNode>;
 
 impl TraceNode {

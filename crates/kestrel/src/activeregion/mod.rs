@@ -487,13 +487,12 @@ impl ActiveRegionDetector {
                 break;
             }
 
-            if peak_scan_index > 0
-                && scan_end_index.saturating_sub(peak_scan_index) >= self.kmer_util.k_size()
-            {
-                last_valley_index = scan_end_index;
-            } else if peak_scan_index == 0
-                && scan_end_index.saturating_sub(ref_count_index) >= self.kmer_util.k_size()
-            {
+            let valley_base = if peak_scan_index > 0 {
+                peak_scan_index
+            } else {
+                ref_count_index
+            };
+            if scan_end_index.saturating_sub(valley_base) >= self.kmer_util.k_size() {
                 last_valley_index = scan_end_index;
             }
 

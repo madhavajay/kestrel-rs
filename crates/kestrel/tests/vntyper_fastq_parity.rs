@@ -103,7 +103,11 @@ fn run_kestrel(reference: &Path, fastqs: &[PathBuf], sample: &str, output: &Path
     runner.set_peak_scan_length(7).unwrap();
     runner.set_scan_limit_factor(7.0).unwrap();
     runner.set_call_ambiguous_regions(true);
-    runner.set_min_kmer_count(1).unwrap();
+    // Use Java's default `DEFAULT_MIN_KMER_COUNT = 5`, which translates to
+    // `kmercount:5` post-count filter in kanalyze. The Java CLI used to
+    // generate the expected fixture passes no --mincount, so 5 is the
+    // effective threshold.
+    runner.set_min_kmer_count(5).unwrap();
     runner
         .set_max_haplotypes(parity_usize_env("KESTREL_VNTYPER_MAX_HAPLOTYPES", 2) as i32)
         .unwrap();
@@ -263,12 +267,18 @@ fn gdp_buckets(records: &[ParsedVcfRecord]) -> BTreeMap<&'static str, usize> {
 }
 
 fn vcf_records(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+    let mut records = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(str::to_owned)
-        .collect()
+        .collect::<Vec<_>>();
+    // Java's VCF writer stores records in a HashMap keyed by VariantCall
+    // object identity, then sorts only by POS/REF/ALT. Ties across contigs
+    // therefore have JVM allocation-order-dependent output. Canonicalize here
+    // while still requiring every full VCF record and sample depth to match.
+    records.sort();
+    records
 }
 
 fn decompress_gzip(input: &Path, temp: &Path) -> PathBuf {

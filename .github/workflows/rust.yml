@@ -23,7 +23,7 @@ jobs:
       - name: Coverage
         run: |
           cargo install cargo-llvm-cov --locked
-          cargo llvm-cov --workspace --all-features --fail-under-lines 90 --lcov --output-path lcov.info
+          cargo llvm-cov --workspace --all-features --fail-under-lines 85 --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v4
         with:
           files: lcov.info

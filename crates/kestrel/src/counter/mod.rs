@@ -41,17 +41,32 @@ pub struct MemoryCountMap {
     counter: KmerCounter,
     sample: Option<InputSample>,
     aborted: AtomicBool,
+    /// Drops k-mers with count strictly less than this threshold from the
+    /// count map after counting completes. Mirrors Java
+    /// `KestrelRunnerBase.getCountModule` which adds
+    /// `kmercount:<min_kmer_count>` as a post-count filter whenever
+    /// `min_kmer_count > 0`. Default `0` disables filtering.
+    min_count: u32,
 }
 
 impl MemoryCountMap {
     /// Creates an empty in-memory count map.
     #[must_use]
     pub fn new(kmer_util: KmerUtil) -> Self {
+        Self::with_min_count(kmer_util, 0)
+    }
+
+    /// Creates an empty in-memory count map that drops k-mers whose count
+    /// is strictly less than `min_count` after counting (Java parity for
+    /// `kmercount:<min_count>`).
+    #[must_use]
+    pub fn with_min_count(kmer_util: KmerUtil, min_count: u32) -> Self {
         Self {
             kmer_util,
             counter: KmerCounter::new(),
             sample: None,
             aborted: AtomicBool::new(false),
+            min_count,
         }
     }
 
@@ -112,6 +127,11 @@ impl CountMap for MemoryCountMap {
             return Err(CountMapError::Aborted);
         }
 
+        if self.min_count > 1 {
+            let threshold = self.min_count;
+            self.counter.retain(|_, count| *count >= threshold);
+        }
+
         Ok(())
     }
 
@@ -134,11 +154,26 @@ pub struct IkcCountMap {
     sample: Option<InputSample>,
     temp_file: Option<PathBuf>,
     aborted: AtomicBool,
+    /// Drops k-mers with count strictly less than this threshold after
+    /// counting (Java parity for `kmercount:<min_count>` post-count filter).
+    /// Default `0` disables filtering.
+    min_count: u32,
 }
 
 impl IkcCountMap {
     /// Creates an IKC-backed count map.
     pub fn new(kmer_util: KmerUtil, k_min_size: usize, mask: u32) -> Result<Self, CountMapError> {
+        Self::with_min_count(kmer_util, k_min_size, mask, 0)
+    }
+
+    /// Creates an IKC-backed count map that drops k-mers below `min_count`
+    /// after counting (Java parity).
+    pub fn with_min_count(
+        kmer_util: KmerUtil,
+        k_min_size: usize,
+        mask: u32,
+        min_count: u32,
+    ) -> Result<Self, CountMapError> {
         IkcWriter::new(kmer_util.clone(), k_min_size, mask)?;
         Ok(Self {
             kmer_util,
@@ -148,6 +183,7 @@ impl IkcCountMap {
             sample: None,
             temp_file: None,
             aborted: AtomicBool::new(false),
+            min_count,
         })
     }
 
@@ -197,6 +233,11 @@ impl CountMap for IkcCountMap {
         if self.is_aborted() {
             self.sample = None;
             return Err(CountMapError::Aborted);
+        }
+
+        if self.min_count > 1 {
+            let threshold = self.min_count;
+            counter.retain(|_, count| *count >= threshold);
         }
 
         let records = counter

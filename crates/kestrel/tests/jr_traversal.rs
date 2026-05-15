@@ -14,9 +14,10 @@ use kestrel::interval::RegionInterval;
 use kestrel::io::InputSample;
 use kestrel::refreader::{ReferenceRegion, ReferenceSequence};
 use kestrel::runner::{RunConfig, graph_haplotypes_for_test};
+use kestrel::variant::{VariantCall, VariantCaller};
 
-const J_R_REFERENCE: &str =
-    "TGGGGGGGCGGTGGAGCCCGGGGCCGGCCTGGTGTCCGTGCCCGAGGTGACACCGTGGGCTGCGGGCGCGGTGGAGCCCGGGGCCGGCCTGCTCTCCGGTGCCGAGGTGACACCGTGGGC";
+const J_R_REFERENCE: &str = "TGGGGGGGCGGTGGAGCCCGGGGCCGGCCTGGTGTCCGTGCCCGAGGTGACACCGTGGGCTGCGGGCGCGGTGGAGCCCGGGGCCGGCCTGCTCTCCGGTGCCGAGGTGACACCGTGGGC";
+const FIVE_C_N_REFERENCE: &str = "TGGGGGGGCGGTGGAGCCCGTGGCCGGCCTGCTCTCCGGGGCCGAGGTGACACCGTGGGCTTGGGGGGCGGTGGAGCCCGGGGCCGGCCTGGTGTCCGGGGCTGAGGTGACATCGTGGGC";
 
 #[test]
 fn jr_traversal_chain_growth() {
@@ -76,16 +77,87 @@ fn jr_traversal_chain_growth() {
     );
 }
 
+#[test]
+fn five_c_n_insertion_region_diagnostic() {
+    if std::env::var_os("KESTREL_RUN_MUC1_INS_DIAGNOSTIC").is_none() {
+        eprintln!("set KESTREL_RUN_MUC1_INS_DIAGNOSTIC=1 to run MUC1 INS diagnostic");
+        return;
+    }
+
+    let kmer_util = KmerUtil::new(20).unwrap();
+    let counts = load_counts(&kmer_util);
+    let count_map = TsvCountMap { counts };
+
+    let ref_region = reference_region("5C-N", FIVE_C_N_REFERENCE);
+    let counts_array = collect_counts(&kmer_util, &ref_region, &count_map);
+    let region = ActiveRegion::new(ref_region.clone(), 0, 34, &counts_array, &kmer_util).unwrap();
+
+    let mut config = RunConfig::default();
+    config.k_size = 20;
+    config.min_kmer_count = 5;
+    config.minimum_difference = 5;
+    config.count_reverse_kmers = true;
+    config.max_haplotypes = 15;
+    config.max_aligner_state = 10;
+    config.max_repeat_count = 0;
+    config.peak_scan_length = 7;
+
+    let haplotypes = graph_haplotypes_for_test(&config, &kmer_util, &count_map, &region).unwrap();
+
+    eprintln!("[5C-N] haplotypes produced: {}", haplotypes.len());
+    for (idx, hap) in haplotypes.iter().enumerate() {
+        eprintln!(
+            "[5C-N] hap {}: len={} min={} cigar={} seq={}",
+            idx,
+            hap.sequence.len(),
+            hap.stats.min,
+            hap.alignment.cigar_string(),
+            String::from_utf8_lossy(&hap.sequence)
+        );
+        for row in hap.alignment_string(0).unwrap() {
+            eprintln!("[5C-N]   {row}");
+        }
+    }
+
+    let mut caller = VariantCaller::new();
+    caller.init(region);
+    caller.set_variant_call_by_reference();
+    for haplotype in haplotypes {
+        caller.add(haplotype).unwrap();
+    }
+    let variants = caller.variants();
+    for variant in &variants {
+        eprintln!(
+            "[5C-N] variant pos={} ref={} alt={} gdp={} dp={}",
+            variant.vcf_pos(),
+            variant.vcf_ref().unwrap(),
+            variant.vcf_alt().unwrap(),
+            variant.data().variant_depth,
+            variant.data().locus_depth
+        );
+    }
+
+    assert!(
+        variants.iter().any(|variant| {
+            variant.vcf_pos() == 26
+                && variant.vcf_ref().unwrap() == "G"
+                && variant.vcf_alt().unwrap() == "GGGTGGAGCCCGGGGCCGG"
+        }),
+        "expected Java's 5C-N:26 18-base insertion in diagnostic output"
+    );
+}
+
 fn load_counts(util: &KmerUtil) -> HashMap<KmerKey, u32> {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jr_counts.tsv");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jr_counts.tsv");
     let contents = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
     let mut counts = HashMap::new();
     for line in contents.lines() {
         let mut parts = line.split('\t');
         let Some(seq) = parts.next() else { continue };
-        let Some(count_str) = parts.next() else { continue };
+        let Some(count_str) = parts.next() else {
+            continue;
+        };
         let count: u32 = count_str.parse().expect("invalid count");
         if seq.len() != util.k_size() {
             continue;
@@ -94,6 +166,11 @@ fn load_counts(util: &KmerUtil) -> HashMap<KmerKey, u32> {
         counts.insert(kmer, count);
     }
     counts
+}
+
+fn reference_region(name: &str, sequence: &str) -> ReferenceRegion {
+    let ref_seq = ReferenceSequence::new(name, sequence.len() as i32, None, Some("test")).unwrap();
+    ReferenceRegion::whole(ref_seq, sequence.as_bytes(), 0).unwrap()
 }
 
 fn collect_counts(

@@ -23,6 +23,10 @@ fn save_counter_enabled() -> bool {
     std::env::var_os("KESTREL_DEBUG_BUILD").is_some()
 }
 
+fn state_trace_enabled() -> bool {
+    std::env::var_os("KESTREL_TRACE_STATE").is_some()
+}
+
 use crate::activeregion::{ActiveRegion, ActiveRegionError, Haplotype, RegionStats};
 use crate::constants::{ARRAY_EXPAND_FACTOR, MAX_ARRAY_SIZE, MIN_KMER_SIZE};
 use crate::counter::CountMap;
@@ -1315,10 +1319,29 @@ impl KmerAligner {
             if save_counter_enabled() {
                 SAVE_REJECTS.with(|c| c.set(c.get() + 1));
             }
+            if state_trace_enabled() {
+                eprintln!(
+                    "[KDBG-SAVE] reject kmer={} next={} min={}",
+                    self.kmer_util.decode(&kmer).into_iter().collect::<String>(),
+                    next_base.as_char(),
+                    min_depth,
+                );
+            }
             return Ok(());
         }
         if save_counter_enabled() {
             SAVE_ACCEPTS.with(|c| c.set(c.get() + 1));
+        }
+        if state_trace_enabled() {
+            eprintln!(
+                "[KDBG-SAVE] accept kmer={} next={} min={}",
+                self.kmer_util.decode(&kmer).into_iter().collect::<String>(),
+                next_base.as_char(),
+                min_depth,
+            );
+        }
+        if let Some(previous_head) = self.saved_states.last_mut() {
+            previous_head.java_stale_up = false;
         }
         self.saved_state_count += 1;
 
@@ -1334,6 +1357,7 @@ impl KmerAligner {
             min_depth,
             kmer_hash,
             repeat_count,
+            java_stale_up: false,
         });
         Ok(())
     }
@@ -1343,6 +1367,21 @@ impl KmerAligner {
         let Some(saved) = self.saved_states.pop() else {
             return Ok(None);
         };
+        if let Some(new_head) = self.saved_states.last_mut() {
+            new_head.java_stale_up = true;
+        }
+        if state_trace_enabled() {
+            eprintln!(
+                "[KDBG-RESTORE-STATE] kmer={} next={} min={} consensus_size={}",
+                self.kmer_util
+                    .decode(&saved.kmer)
+                    .into_iter()
+                    .collect::<String>(),
+                saved.next_base.as_char(),
+                saved.min_depth,
+                saved.consensus_size,
+            );
+        }
 
         self.consensus.truncate(saved.consensus_size);
         self.matrix_col_align = saved.matrix_col_align.clone();
@@ -1371,6 +1410,34 @@ impl KmerAligner {
         else {
             return false;
         };
+        if state_trace_enabled() {
+            let state = &self.saved_states[index];
+            eprintln!(
+                "[KDBG-SAVE] evict{} kmer={} next={} min={} incoming_min={}",
+                if index + 1 == self.saved_states.len() && state.java_stale_up {
+                    "-ghost"
+                } else {
+                    ""
+                },
+                self.kmer_util
+                    .decode(&state.kmer)
+                    .into_iter()
+                    .collect::<String>(),
+                state.next_base.as_char(),
+                state.min_depth,
+                min_depth_limit,
+            );
+        }
+        if index + 1 == self.saved_states.len() && self.saved_states[index].java_stale_up {
+            // Java's linked stack leaves the new head's `nextNodeUp` pointing
+            // at the restored node after `restoreState()`. If that exposed
+            // head is selected for eviction before another save repairs the
+            // upward link, `removeLastMinState()` decrements `nState` but
+            // fails to unlink the node from `stateStack`. Preserve that quirk
+            // because it changes which low-depth branches survive in MUC1.
+            self.saved_state_count -= 1;
+            return true;
+        }
         self.saved_states.remove(index);
         // Java's `removeLastMinState` decrements nState only on successful
         // eviction. Save+evict net to no change in `saved_state_count`.
@@ -1526,6 +1593,7 @@ struct SavedAlignmentState {
     min_depth: i32,
     kmer_hash: KmerHashSet,
     repeat_count: i32,
+    java_stale_up: bool,
 }
 
 fn score_from(node: &Option<TraceNodeRef>, add: f32) -> f32 {
@@ -2792,6 +2860,57 @@ mod tests {
 
         let restored = aligner.restore_state().unwrap().unwrap();
         assert_eq!(restored.kmer, oldest.words());
+        assert!(!aligner.has_cached_states());
+    }
+
+    #[test]
+    fn kmer_aligner_exposed_head_eviction_keeps_java_stale_up_node() {
+        let kmer_util = KmerUtil::new(4).unwrap();
+        let mut aligner =
+            KmerAligner::new(kmer_util.clone(), AlignmentWeight::defaults(), false).unwrap();
+        aligner.init(make_active_region(10, 0, 12)).unwrap();
+        aligner.set_max_state(2).unwrap();
+
+        let exposed = kmer_util.encode(b"AAAC").unwrap();
+        let restored_first = kmer_util.encode(b"AAAG").unwrap();
+        let incoming = kmer_util.encode(b"AAAT").unwrap();
+
+        aligner
+            .save_state(
+                Some(exposed.clone()),
+                Some(Base::C),
+                1,
+                Some(KmerHashSet::new()),
+                0,
+            )
+            .unwrap();
+        aligner
+            .save_state(
+                Some(restored_first),
+                Some(Base::G),
+                2,
+                Some(KmerHashSet::new()),
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(aligner.restore_state().unwrap().unwrap().min_depth, 2);
+
+        aligner
+            .save_state(
+                Some(incoming.clone()),
+                Some(Base::T),
+                3,
+                Some(KmerHashSet::new()),
+                0,
+            )
+            .unwrap();
+
+        let restored = aligner.restore_state().unwrap().unwrap();
+        assert_eq!(restored.kmer, incoming.words());
+
+        let restored = aligner.restore_state().unwrap().unwrap();
+        assert_eq!(restored.kmer, exposed.words());
         assert!(!aligner.has_cached_states());
     }
 

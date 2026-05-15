@@ -267,12 +267,18 @@ fn gdp_buckets(records: &[ParsedVcfRecord]) -> BTreeMap<&'static str, usize> {
 }
 
 fn vcf_records(path: &Path) -> Vec<String> {
-    fs::read_to_string(path)
+    let mut records = fs::read_to_string(path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()))
         .lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .map(str::to_owned)
-        .collect()
+        .collect::<Vec<_>>();
+    // Java's VCF writer stores records in a HashMap keyed by VariantCall
+    // object identity, then sorts only by POS/REF/ALT. Ties across contigs
+    // therefore have JVM allocation-order-dependent output. Canonicalize here
+    // while still requiring every full VCF record and sample depth to match.
+    records.sort();
+    records
 }
 
 fn decompress_gzip(input: &Path, temp: &Path) -> PathBuf {

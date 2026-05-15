@@ -6,7 +6,6 @@ use thiserror::Error;
 use crate::align::{AlignNode, AlignmentWeight, AlignmentWeightError, TraceMatrix};
 use crate::counter::CountMap;
 use crate::refreader::{ReferenceRegion, ReferenceSequenceError};
-use crate::util::number::count_diff_quantile;
 
 /// Errors from active-region summary statistics.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -139,6 +138,12 @@ pub enum AcceptError<E> {
     Detector(ActiveRegionDetectorError),
     /// Error returned from the caller-supplied callback.
     Callback(E),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LeftScanResult {
+    Candidate(Option<(i32, i32)>),
+    SkipPeak { next_index: usize, count_l: i32 },
 }
 
 impl<E: fmt::Display> fmt::Display for AcceptError<E> {
@@ -387,25 +392,43 @@ impl ActiveRegionDetector {
                         last_region_end,
                     )
                     .map_err(AcceptError::Detector)?;
-                if let Some((start, end)) = scanned {
-                    if start < last_region_end && last_region_end > 0 {
+                let (start, end) = match scanned {
+                    LeftScanResult::SkipPeak {
+                        next_index,
+                        count_l: next_count_l,
+                    } => {
+                        count_l = next_count_l;
+                        ref_count_index = next_index;
+                        continue;
+                    }
+                    LeftScanResult::Candidate(Some(region)) => region,
+                    LeftScanResult::Candidate(None) => {
                         count_l = count_r;
                         ref_count_index += 1;
                         continue;
                     }
-                    let candidate = self
-                        .make_region(ref_region, ref_count, start, end)
-                        .map_err(AcceptError::Detector)?;
-                    if let Some(region) = candidate {
-                        let accepted = accept(&region).map_err(AcceptError::Callback)?;
-                        if accepted {
-                            last_region_end = ref_count_index as i32;
-                            regions.push(region);
-                        }
+                };
+                if start < last_region_end && last_region_end > 0 {
+                    count_l = count_r;
+                    ref_count_index += 1;
+                    continue;
+                }
+                let candidate = self
+                    .make_region(ref_region, ref_count, start, end)
+                    .map_err(AcceptError::Detector)?;
+                let mut accepted_left_region = false;
+                if let Some(region) = candidate {
+                    let accepted = accept(&region).map_err(AcceptError::Callback)?;
+                    if accepted {
+                        regions.push(region);
+                        accepted_left_region = true;
                     }
                 }
                 count_l = count_r;
                 ref_count_index += 1;
+                if accepted_left_region {
+                    last_region_end = ref_count_index as i32;
+                }
             } else {
                 count_l = count_r;
                 ref_count_index += 1;
@@ -577,7 +600,7 @@ impl ActiveRegionDetector {
         ref_count_index: usize,
         diff_threshold: i32,
         last_region_end: i32,
-    ) -> Result<Option<(i32, i32)>, ActiveRegionDetectorError> {
+    ) -> Result<LeftScanResult, ActiveRegionDetectorError> {
         let count_l = ref_count[ref_count_index - 1];
         let count_r = ref_count[ref_count_index];
 
@@ -589,20 +612,23 @@ impl ActiveRegionDetector {
                 if ref_count[scan_end_index] <= recovery_value
                     && ref_count[ref_count_index] - ref_count[scan_end_index] < diff_threshold
                 {
-                    return Ok(None);
+                    return Ok(LeftScanResult::SkipPeak {
+                        next_index: scan_end_index + 1,
+                        count_l: ref_count[scan_end_index],
+                    });
                 }
             }
         }
 
         if ref_count_index > self.scan_limit as usize {
-            return Ok(None);
+            return Ok(LeftScanResult::Candidate(None));
         }
 
         let mut scan_end_index = ref_count_index as i32 - 1;
         let last_scan_index = last_region_end.max(0);
         while scan_end_index >= last_scan_index {
             let distance = ref_count_index as i32 - scan_end_index;
-            let recovery = self.recovery_value(count_r, distance, diff_threshold);
+            let recovery = self.left_recovery_value(count_r, distance, diff_threshold);
             if ref_count[scan_end_index as usize] >= recovery {
                 break;
             }
@@ -610,7 +636,7 @@ impl ActiveRegionDetector {
         }
 
         if scan_end_index > 0 {
-            return Ok(None);
+            return Ok(LeftScanResult::Candidate(None));
         }
 
         let mut start = -1;
@@ -629,7 +655,7 @@ impl ActiveRegionDetector {
         }
 
         if start < 0 && self.anchor_both_ends {
-            return Ok(None);
+            return Ok(LeftScanResult::Candidate(None));
         }
         if !self.call_ambiguous_regions {
             let contains_ambiguous = if start < 0 {
@@ -638,11 +664,14 @@ impl ActiveRegionDetector {
                 ref_region.contains_ambiguous_by_index(start, ref_count_index as i32)?
             };
             if contains_ambiguous {
-                return Ok(None);
+                return Ok(LeftScanResult::Candidate(None));
             }
         }
 
-        Ok(Some((start, ref_count_index as i32)))
+        Ok(LeftScanResult::Candidate(Some((
+            start,
+            ref_count_index as i32,
+        ))))
     }
 
     fn recovery_value(&self, anchor_count: i32, distance: i32, diff_threshold: i32) -> i32 {
@@ -652,6 +681,15 @@ impl ActiveRegionDetector {
         let decay_minimum = (anchor_count as f64 * self.decay_minimum).max(1.0);
         let decay_range = anchor_count as f64 - decay_minimum;
         (decay_range * (-(distance as f64) * self.decay_lambda).exp() + decay_minimum) as i32
+    }
+
+    fn left_recovery_value(&self, anchor_count: i32, distance: i32, diff_threshold: i32) -> i32 {
+        if self.decay_minimum == 1.0 {
+            return (anchor_count - diff_threshold).max(1);
+        }
+        let decay_minimum = (anchor_count as f64 * self.decay_minimum).max(1.0);
+        let decay_range = anchor_count as f64 - decay_minimum;
+        (decay_range * ((distance as f64) * self.decay_lambda).exp() + decay_minimum) as i32
     }
 
     fn make_region(
@@ -672,8 +710,7 @@ impl ActiveRegionDetector {
     #[must_use]
     pub fn difference_threshold(&self, count: &[i32]) -> i32 {
         let threshold = if self.difference_quantile > 0.0 && count.len() > 2 {
-            count_diff_quantile(count, self.difference_quantile)
-                .unwrap_or(self.minimum_difference)
+            active_region_count_diff_quantile(count, self.difference_quantile)
                 .max(self.minimum_difference)
         } else {
             self.minimum_difference
@@ -921,6 +958,30 @@ impl ActiveRegionDetector {
     }
 }
 
+fn active_region_count_diff_quantile(count: &[i32], quantile: f64) -> i32 {
+    match count.len() {
+        0 | 1 => 0,
+        2 => (count[1] - count[0]).abs(),
+        len => {
+            let mut diffs = Vec::with_capacity(len - 1);
+            let mut last_count = count[0];
+            for this_count in count.iter().take(len - 1) {
+                diffs.push((last_count - *this_count).abs());
+                last_count = *this_count;
+            }
+            diffs.sort_unstable();
+
+            let n_count = len - 2;
+            let raw = n_count as f64 * quantile;
+            let loc = raw as usize;
+            let offset = raw - loc as f64;
+            let value = diffs[loc] as f64 * (1.0 - offset) + diffs[loc + 1] as f64 * offset;
+
+            value as i32
+        }
+    }
+}
+
 fn scan_limit(
     alignment_weight: &AlignmentWeight,
     k_size: i32,
@@ -1140,8 +1201,8 @@ impl Haplotype {
         let sequence = sequence.into();
         let length = sequence.len();
         let mut alignment_list = alignment_list;
-        alignment_list.sort_by(|left, right| left.compare_to(right).cmp(&0));
         let alignment = alignment_list[0].clone();
+        alignment_list.sort_by(|left, right| left.compare_to(right).cmp(&0));
         let n_align = alignment_list.len();
 
         Ok(Self {
@@ -1649,6 +1710,37 @@ mod tests {
     }
 
     #[test]
+    fn haplotype_primary_alignment_preserves_java_unsorted_constructor_quirk() {
+        let earlier = AlignNode::new(
+            AlignNode::MATCH,
+            1,
+            Some(Box::new(AlignNode::new(AlignNode::INS, 1, None).unwrap())),
+        )
+        .unwrap();
+        let later = AlignNode::new(
+            AlignNode::MATCH,
+            2,
+            Some(Box::new(AlignNode::new(AlignNode::INS, 1, None).unwrap())),
+        )
+        .unwrap();
+
+        assert!(earlier.compare_to(&later) < 0);
+
+        let haplotype = Haplotype::new(
+            b"AAAACCCCGGGGTTTT".to_vec(),
+            ar_default(),
+            vec![later.clone(), earlier.clone()],
+            75.0,
+            None,
+            stats(),
+        )
+        .unwrap();
+
+        assert_eq!(haplotype.alignment, later);
+        assert_eq!(haplotype.alignment_list()[0], earlier);
+    }
+
+    #[test]
     fn haplotype_alignment_string_and_bounds_match_java_tests() {
         let active_region = ar_default();
         let n = active_region.end_index - active_region.start_index + 1;
@@ -1823,6 +1915,66 @@ mod tests {
         assert!(!detector.emit_wildtype_active_regions());
         assert!(!detector.trace_haplotype_alignment());
         assert_eq!(detector.scan_limit_length(), 28);
+    }
+
+    #[test]
+    fn active_region_detector_difference_threshold_matches_java_detector_quantile_quirk() {
+        let mut detector = ActiveRegionDetector::new(KmerUtil::new(20).unwrap()).unwrap();
+        detector.set_minimum_difference(5).unwrap();
+        detector.set_difference_quantile(0.90).unwrap();
+        let counts = [
+            20320, 21214, 23717, 24751, 24555, 21382, 21499, 26513, 25154, 26661, 26536, 26633,
+            21662, 20471, 20483, 21048, 21226, 21403, 21503, 21805, 21694, 21648, 21646, 21419,
+            21460, 23762, 24142, 23891, 22801, 22787, 22938, 23009, 22823, 23764, 29079, 28929,
+            28820, 29199, 29139, 29036, 28896, 28766, 26133, 6331, 6325, 6347, 6331, 6249, 5879,
+            5860, 5912, 5848, 5866, 5869, 5887, 5712, 5802, 5708, 5691, 5689, 5669, 5755, 5715,
+            5741, 5684, 4056, 4060, 26513, 25154, 26661, 26536, 26633, 5849, 5737, 5732, 5871,
+            5911, 5944, 5985, 6002, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            28896,
+        ];
+
+        assert_eq!(detector.difference_threshold(&counts), 2322);
+    }
+
+    #[test]
+    fn active_region_detector_left_exponential_recovery_matches_java_direction() {
+        let mut detector = ActiveRegionDetector::new(KmerUtil::new(20).unwrap()).unwrap();
+        detector.set_minimum_difference(5).unwrap();
+        detector.set_difference_quantile(0.90).unwrap();
+        detector.set_anchor_both_ends(true);
+        detector.set_decay_minimum(0.55).unwrap();
+        detector.set_decay_alpha(0.80).unwrap();
+        detector.set_peak_scan_length(7).unwrap();
+        detector.set_scan_limit_factor(7.0).unwrap();
+        let sequence = vec![b'A'; 120];
+        let ref_region = ref_region(&sequence);
+        let counts = [
+            0, 0, 0, 0, 0, 7, 21499, 26513, 25154, 26661, 26536, 26633, 21662, 20471, 20483, 21048,
+            21226, 21403, 21503, 21805, 21694, 21648, 21646, 21, 22, 26, 24, 25, 24, 35, 34, 34,
+            1576, 23, 29, 29, 28, 29, 29, 29, 29, 28, 24, 6331, 6325, 6347, 6331, 6249, 5879, 5860,
+            5912, 5848, 5866, 5869, 5887, 5712, 5802, 5708, 5691, 5689, 5669, 5755, 5715, 5741,
+            5684, 4056, 4060, 26513, 25154, 26661, 26536, 26633, 5849, 5737, 5732, 5871, 5911,
+            5944, 5985, 6002, 6004, 5993, 5969, 5938, 5944, 5853, 5936, 5906, 5714, 5704, 5741,
+            5787, 5604, 5698, 29079, 28929, 28820, 29199, 29139, 29036, 28896,
+        ];
+        let mut candidates = Vec::new();
+
+        let regions = detector
+            .detect_from_counts_with(&ref_region, &counts, |region| {
+                candidates.push((region.start_index, region.end_index));
+                Ok::<bool, std::convert::Infallible>(matches!(
+                    (region.start_index, region.end_index),
+                    (33, 86) | (71, 113)
+                ))
+            })
+            .unwrap();
+
+        assert!(candidates.contains(&(33, 86)), "{candidates:?}");
+        assert!(
+            regions
+                .iter()
+                .any(|region| { (region.start_index, region.end_index) == (33, 86) })
+        );
     }
 
     #[test]
